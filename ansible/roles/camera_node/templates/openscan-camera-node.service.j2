@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenScan camera node service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ openscan_service_user }}
+Group={{ openscan_service_group }}
+WorkingDirectory={{ openscan_share_root }}
+Environment=OPENSCAN_CAMERA_NODE_CONFIG={{ openscan_node_config_dir }}/config.yaml
+Environment=OPENSCAN_CAMERA_NODE_PROFILES={{ openscan_node_config_dir }}/profiles.yaml
+ExecStart={{ openscan_camera_node_venv }}/bin/openscan-camera-node
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

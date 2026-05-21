@@ -1,0 +1,7 @@
+- name: Provision OpenScan camera nodes
+  hosts: camera_nodes
+  become: true
+  roles:
+    - common
+    - samba_share
+    - camera_node

@@ -1,0 +1,54 @@
+ansible_user: pi
+
+openscan_service_user: openscan
+openscan_service_group: openscan
+openscan_service_extra_groups:
+  - video
+  - render
+
+openscan_share_root: /srv/openscan-camera
+openscan_sessions_root: "{{ openscan_share_root }}/sessions"
+
+openscan_node_config_dir: /etc/openscan-camera-node
+openscan_camera_node_install_dir: /opt/openscan-camera-node
+openscan_camera_node_venv: "{{ openscan_camera_node_install_dir }}/venv"
+openscan_camera_node_package_src: "{{ playbook_dir }}/../../camera_node"
+openscan_camera_node_profiles_src: "{{ playbook_dir }}/../../examples/profiles.yml"
+openscan_camera_node_listen_host: "0.0.0.0"
+openscan_camera_node_listen_port: 8080
+openscan_camera_boot_config_lines:
+  - regexp: '^#?\s*camera_auto_detect=.*$'
+    line: camera_auto_detect=0
+  - regexp: '^#?\s*dtoverlay=imx519.*$'
+    line: dtoverlay=imx519
+openscan_arducam_pivariety_install: true
+openscan_arducam_pivariety_script_url: https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
+openscan_arducam_pivariety_install_dir: /opt/arducam-pivariety
+openscan_arducam_pivariety_log_dir: /var/log/openscan-camera
+openscan_arducam_pivariety_marker_dir: /var/lib/openscan-camera/arducam-pivariety
+openscan_arducam_pivariety_prerequisite_packages:
+  - libopencv-core410
+  - libopencv-imgproc410
+  - libopencv-objdetect410
+  - rpicam-apps-opencv-postprocess
+openscan_arducam_pivariety_packages:
+  - libcamera_dev
+  - libcamera_apps
+openscan_arducam_pivariety_install_timeout: 1800
+
+openscan_common_packages:
+  - python3
+  - python3-venv
+  - python3-pip
+  - python3-setuptools
+  - ca-certificates
+  - git
+  - curl
+  - rpicam-apps-lite
+
+openscan_samba_workgroup: WORKGROUP
+openscan_samba_share_name: openscan-camera
+openscan_samba_guest_access: true
+openscan_samba_username: openscan
+openscan_samba_password: change-me-use-ansible-vault
+openscan_samba_force_user: "{{ openscan_service_user }}"

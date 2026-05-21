@@ -1,0 +1,51 @@
+profiles:
+  video_1080p25:
+    description: 1080p H.264 video at 25 fps
+    output_extension: h264
+    rpicam_vid_args:
+      - --width
+      - "1920"
+      - --height
+      - "1080"
+      - --framerate
+      - "25"
+      - --codec
+      - h264
+      - --bitrate
+      - "12000000"
+      - --inline
+      - --nopreview
+
+  video_1080p50_experimental:
+    description: 1080p H.264 video at 50 fps; useful for testing only
+    output_extension: h264
+    rpicam_vid_args:
+      - --width
+      - "1920"
+      - --height
+      - "1080"
+      - --framerate
+      - "50"
+      - --codec
+      - h264
+      - --bitrate
+      - "20000000"
+      - --inline
+      - --nopreview
+
+  timelapse_1080p6:
+    description: Simple low-framerate 1080p H.264 capture at 6 fps
+    output_extension: h264
+    rpicam_vid_args:
+      - --width
+      - "1920"
+      - --height
+      - "1080"
+      - --framerate
+      - "6"
+      - --codec
+      - h264
+      - --bitrate
+      - "6000000"
+      - --inline
+      - --nopreview

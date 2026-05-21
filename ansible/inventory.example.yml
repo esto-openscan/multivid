@@ -1,0 +1,13 @@
+all:
+  children:
+    camera_nodes:
+      hosts:
+        cam-front:
+          ansible_host: 192.168.1.101
+          camera_id: front
+        cam-side:
+          ansible_host: 192.168.1.102
+          camera_id: side
+        cam-top:
+          ansible_host: 192.168.1.103
+          camera_id: top

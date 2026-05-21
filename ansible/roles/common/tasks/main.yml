@@ -1,0 +1,37 @@
+- name: Repair interrupted apt/dpkg state
+  ansible.builtin.command: apt-get install -f -y
+  register: openscan_apt_repair_result
+  changed_when: "'0 upgraded, 0 newly installed' not in openscan_apt_repair_result.stdout"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    APT_LISTCHANGES_FRONTEND: none
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ openscan_common_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure service group exists
+  ansible.builtin.group:
+    name: "{{ openscan_service_group }}"
+    system: true
+    state: present
+
+- name: Gather local groups
+  ansible.builtin.getent:
+    database: group
+
+- name: Ensure service user exists
+  ansible.builtin.user:
+    name: "{{ openscan_service_user }}"
+    group: "{{ openscan_service_group }}"
+    groups: "{{ openscan_service_extra_groups | select('in', ansible_facts.getent_group.keys() | list) | list }}"
+    append: true
+    system: true
+    create_home: false
+    home: "{{ openscan_share_root }}"
+    shell: /usr/sbin/nologin
+    state: present
+  register: openscan_service_user_result

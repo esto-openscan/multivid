@@ -1,0 +1,9 @@
+- name: Reload systemd
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Restart camera node
+  ansible.builtin.systemd:
+    name: openscan-camera-node.service
+    state: restarted
+    daemon_reload: true

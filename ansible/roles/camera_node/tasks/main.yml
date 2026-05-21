@@ -1,0 +1,234 @@
+- name: Check Raspberry Pi Bookworm boot config path
+  ansible.builtin.stat:
+    path: /boot/firmware/config.txt
+  register: openscan_bookworm_boot_config
+
+- name: Check Raspberry Pi legacy boot config path
+  ansible.builtin.stat:
+    path: /boot/config.txt
+  register: openscan_legacy_boot_config
+
+- name: Select Raspberry Pi boot config path
+  ansible.builtin.set_fact:
+    openscan_boot_config_path: "{{ '/boot/firmware/config.txt' if openscan_bookworm_boot_config.stat.exists else '/boot/config.txt' }}"
+
+- name: Fail if Raspberry Pi boot config was not found
+  ansible.builtin.fail:
+    msg: "Neither /boot/firmware/config.txt nor /boot/config.txt exists on this host."
+  when:
+    - not openscan_bookworm_boot_config.stat.exists
+    - not openscan_legacy_boot_config.stat.exists
+
+- name: Configure Raspberry Pi camera boot settings
+  ansible.builtin.lineinfile:
+    path: "{{ openscan_boot_config_path }}"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    insertafter: '^\[all\]'
+    state: present
+  loop: "{{ openscan_camera_boot_config_lines }}"
+  register: openscan_camera_boot_config_result
+
+- name: Reboot after camera boot config changes
+  ansible.builtin.reboot:
+    msg: "Rebooting to apply OpenScan camera boot overlay settings"
+    reboot_timeout: 300
+  when: openscan_camera_boot_config_result.changed
+
+- name: Ensure Arducam Pivariety install directory exists
+  ansible.builtin.file:
+    path: "{{ openscan_arducam_pivariety_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: openscan_arducam_pivariety_install
+
+- name: Ensure Arducam Pivariety marker directory exists
+  ansible.builtin.file:
+    path: "{{ openscan_arducam_pivariety_marker_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: openscan_arducam_pivariety_install
+
+- name: Ensure Arducam Pivariety log directory exists
+  ansible.builtin.file:
+    path: "{{ openscan_arducam_pivariety_log_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when: openscan_arducam_pivariety_install
+
+- name: Download Arducam Pivariety installer
+  ansible.builtin.get_url:
+    url: "{{ openscan_arducam_pivariety_script_url }}"
+    dest: "{{ openscan_arducam_pivariety_install_dir }}/install_pivariety_pkgs.sh"
+    owner: root
+    group: root
+    mode: "0755"
+  when: openscan_arducam_pivariety_install
+
+- name: Install Arducam rpicam-apps OpenCV prerequisites
+  ansible.builtin.apt:
+    name: "{{ openscan_arducam_pivariety_prerequisite_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    APT_LISTCHANGES_FRONTEND: none
+  when: openscan_arducam_pivariety_install
+
+- name: Repair apt dependencies before Arducam install
+  ansible.builtin.command: apt-get install -f -y
+  register: openscan_pre_arducam_apt_repair_result
+  changed_when: "'0 upgraded, 0 newly installed' not in openscan_pre_arducam_apt_repair_result.stdout"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    APT_LISTCHANGES_FRONTEND: none
+  when: openscan_arducam_pivariety_install
+
+- name: Install Arducam IMX519 autofocus packages
+  ansible.builtin.shell: >
+    set -o pipefail &&
+    timeout {{ openscan_arducam_pivariety_install_timeout | int }}
+    bash -c 'yes | {{ openscan_arducam_pivariety_install_dir }}/install_pivariety_pkgs.sh -p {{ item }}'
+    2>&1 | tee {{ openscan_arducam_pivariety_log_dir }}/install-{{ item }}.log
+  args:
+    creates: "{{ openscan_arducam_pivariety_marker_dir }}/{{ item }}.installed"
+    executable: /bin/bash
+  loop: "{{ openscan_arducam_pivariety_packages }}"
+  register: openscan_arducam_pivariety_install_result
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    APT_LISTCHANGES_FRONTEND: none
+  when: openscan_arducam_pivariety_install
+
+- name: Repair apt dependencies after Arducam install
+  ansible.builtin.command: apt-get install -f -y
+  register: openscan_post_arducam_apt_repair_result
+  changed_when: "'0 upgraded, 0 newly installed' not in openscan_post_arducam_apt_repair_result.stdout"
+  environment:
+    DEBIAN_FRONTEND: noninteractive
+    APT_LISTCHANGES_FRONTEND: none
+  when:
+    - openscan_arducam_pivariety_install
+    - openscan_arducam_pivariety_install_result is defined
+
+- name: Mark Arducam IMX519 autofocus packages as installed
+  ansible.builtin.file:
+    path: "{{ openscan_arducam_pivariety_marker_dir }}/{{ item.item }}.installed"
+    state: touch
+    owner: root
+    group: root
+    mode: "0644"
+  loop: "{{ openscan_arducam_pivariety_install_result.results | default([]) }}"
+  when:
+    - openscan_arducam_pivariety_install
+    - item.changed
+
+- name: Reboot after Arducam camera stack changes
+  ansible.builtin.reboot:
+    msg: "Rebooting to apply Arducam IMX519 autofocus packages"
+    reboot_timeout: 300
+  when:
+    - openscan_arducam_pivariety_install
+    - openscan_arducam_pivariety_install_result is defined
+    - openscan_arducam_pivariety_install_result.changed
+
+- name: Ensure camera node install directory exists
+  ansible.builtin.file:
+    path: "{{ openscan_camera_node_install_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy camera node Python package
+  ansible.builtin.copy:
+    src: "{{ openscan_camera_node_package_src }}/"
+    dest: "{{ openscan_camera_node_install_dir }}/src/"
+    owner: root
+    group: root
+    mode: preserve
+  notify: Restart camera node
+
+- name: Create camera node virtual environment
+  ansible.builtin.command: "python3 -m venv {{ openscan_camera_node_venv }}"
+  args:
+    creates: "{{ openscan_camera_node_venv }}/bin/python"
+
+- name: Install camera node Python package into virtual environment
+  ansible.builtin.command: "{{ openscan_camera_node_venv }}/bin/python -m pip install -e {{ openscan_camera_node_install_dir }}/src"
+  register: openscan_camera_node_pip_install
+  changed_when: "'Successfully installed' in openscan_camera_node_pip_install.stdout"
+  notify: Restart camera node
+
+- name: Ensure camera node config directory exists
+  ansible.builtin.file:
+    path: "{{ openscan_node_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ openscan_service_group }}"
+    mode: "0750"
+
+- name: Install camera node config
+  ansible.builtin.template:
+    src: config.yaml.j2
+    dest: "{{ openscan_node_config_dir }}/config.yaml"
+    owner: root
+    group: "{{ openscan_service_group }}"
+    mode: "0640"
+  notify: Restart camera node
+
+- name: Install camera node recording profiles
+  ansible.builtin.copy:
+    src: "{{ openscan_camera_node_profiles_src }}"
+    dest: "{{ openscan_node_config_dir }}/profiles.yaml"
+    owner: root
+    group: "{{ openscan_service_group }}"
+    mode: "0640"
+  notify: Restart camera node
+
+- name: Install camera node systemd service
+  ansible.builtin.template:
+    src: openscan-camera-node.service.j2
+    dest: /etc/systemd/system/openscan-camera-node.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart camera node
+
+- name: Enable and start camera node service
+  ansible.builtin.systemd:
+    name: openscan-camera-node.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Restart camera node after service user group changes
+  ansible.builtin.systemd:
+    name: openscan-camera-node.service
+    state: restarted
+  when:
+    - openscan_service_user_result is defined
+    - openscan_service_user_result.changed
+
+- name: Apply pending camera node service changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Wait for camera node health endpoint
+  ansible.builtin.uri:
+    url: "http://127.0.0.1:{{ openscan_camera_node_listen_port }}/health"
+    method: GET
+    return_content: true
+    status_code: 200
+  register: openscan_camera_node_health
+  retries: 12
+  delay: 2
+  until: openscan_camera_node_health.status == 200

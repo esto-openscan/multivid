@@ -1,0 +1,71 @@
+- name: Install Samba
+  ansible.builtin.apt:
+    name: samba
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Ensure Samba Unix user exists
+  ansible.builtin.user:
+    name: "{{ openscan_samba_username }}"
+    group: "{{ openscan_service_group }}"
+    system: true
+    create_home: false
+    home: "{{ openscan_share_root }}"
+    shell: /usr/sbin/nologin
+    state: present
+  when: not openscan_samba_guest_access
+
+- name: Create OpenScan share root
+  ansible.builtin.file:
+    path: "{{ openscan_share_root }}"
+    state: directory
+    owner: "{{ openscan_service_user }}"
+    group: "{{ openscan_service_group }}"
+    mode: "0775"
+
+- name: Create OpenScan sessions root
+  ansible.builtin.file:
+    path: "{{ openscan_sessions_root }}"
+    state: directory
+    owner: "{{ openscan_service_user }}"
+    group: "{{ openscan_service_group }}"
+    mode: "0775"
+
+- name: Check whether Samba user exists
+  ansible.builtin.command: "pdbedit -L -u {{ openscan_samba_username }}"
+  register: openscan_samba_user_check
+  changed_when: false
+  failed_when: false
+  when: not openscan_samba_guest_access
+
+- name: Create Samba password for share user
+  ansible.builtin.shell: "printf '%s\n%s\n' {{ openscan_samba_password | quote }} {{ openscan_samba_password | quote }} | smbpasswd -a -s {{ openscan_samba_username | quote }}"
+  no_log: true
+  changed_when: true
+  when:
+    - not openscan_samba_guest_access
+    - openscan_samba_user_check.rc | default(1) != 0
+
+- name: Allow unknown SMB users to map to guest
+  ansible.builtin.lineinfile:
+    path: /etc/samba/smb.conf
+    regexp: '^\s*map to guest\s*='
+    line: "   map to guest = Bad User"
+    insertafter: '^\[global\]'
+    state: present
+  notify: Restart Samba
+  when: openscan_samba_guest_access
+
+- name: Configure OpenScan Samba share
+  ansible.builtin.blockinfile:
+    path: /etc/samba/smb.conf
+    marker: "# {mark} ANSIBLE MANAGED OPENSCAN CAMERA SHARE"
+    block: "{{ lookup('ansible.builtin.template', 'openscan-camera-share.conf.j2') }}"
+  notify: Restart Samba
+
+- name: Enable and start Samba
+  ansible.builtin.service:
+    name: smbd
+    enabled: true
+    state: started

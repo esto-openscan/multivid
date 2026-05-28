@@ -30,6 +30,8 @@ profiles:
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
+      use_calibration_suggestions: false
+      apply_suggestions_to_recording: false
     rpicam_vid_extra_args:
       - --inline
 
@@ -64,6 +66,80 @@ profiles:
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
+      use_calibration_suggestions: false
+      apply_suggestions_to_recording: false
+    rpicam_vid_extra_args:
+      - --inline
+
+  video_1080p25_calibrated_suggest:
+    description: Experimental 1080p25 profile that records auto controls but links calibration suggestions during prepare
+    output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      container: null
+      duration: null
+      nopreview: true
+      save_pts: false
+    camera_controls:
+      shutter_us: null
+      gain: null
+      awbgains: null
+      autofocus_mode: null
+      lens_position: null
+      denoise: null
+      ev: null
+      metering: null
+      awb: null
+    camera_control_policy:
+      pre_roll_seconds: 5
+      exposure_mode: auto_then_lock
+      awb_mode: auto_then_lock
+      focus_mode: auto_then_lock
+      reuse_prepared_controls: true
+      refocus_on_each_take: false
+      prepare_warmup_seconds: 0
+      use_calibration_suggestions: true
+      apply_suggestions_to_recording: false
+    rpicam_vid_extra_args:
+      - --inline
+
+  video_1080p25_auto_then_lock_experimental:
+    description: Experimental 1080p25 profile that can apply calibration suggestions only when explicitly enabled
+    output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      container: null
+      duration: null
+      nopreview: true
+      save_pts: false
+    camera_controls:
+      shutter_us: null
+      gain: null
+      awbgains: null
+      autofocus_mode: null
+      lens_position: null
+      denoise: null
+      ev: null
+      metering: null
+      awb: null
+    camera_control_policy:
+      pre_roll_seconds: 5
+      exposure_mode: auto_then_lock
+      awb_mode: auto_then_lock
+      focus_mode: auto_then_lock
+      reuse_prepared_controls: true
+      refocus_on_each_take: false
+      prepare_warmup_seconds: 0
+      use_calibration_suggestions: true
+      apply_suggestions_to_recording: false
     rpicam_vid_extra_args:
       - --inline
 
@@ -99,6 +175,8 @@ profiles:
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
+      use_calibration_suggestions: false
+      apply_suggestions_to_recording: false
     rpicam_vid_extra_args:
       - --inline
 
@@ -133,5 +211,7 @@ profiles:
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
+      use_calibration_suggestions: false
+      apply_suggestions_to_recording: false
     rpicam_vid_extra_args:
       - --inline

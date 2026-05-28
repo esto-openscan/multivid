@@ -115,6 +115,10 @@ Each node exposes:
 - `POST /recordings/stop`
 - `POST /prepare`
 - `POST /prepare/reset`
+- `POST /calibration/run`
+- `GET /calibration/status`
+- `GET /calibration/last`
+- `POST /calibration/apply-to-session`
 
 Start requests use this JSON body:
 
@@ -125,6 +129,7 @@ Start requests use this JSON body:
   "take_id": "take_001",
   "force_prepare": false,
   "refocus": false,
+  "apply_calibration_suggestions": false,
   "notes": "optional operator note"
 }
 ```
@@ -150,12 +155,42 @@ Prepare reset requests use this JSON body:
 }
 ```
 
+Calibration run requests use this JSON body:
+
+```json
+{
+  "session_id": "test-001",
+  "profile": "video_1080p25_auto",
+  "duration_seconds": 5,
+  "calibration_id": "cal-gray-card",
+  "target": "gray_card",
+  "notes": "optional operator note",
+  "apply_to_session": false
+}
+```
+
+Only `session_id` and `profile` are required. The node writes calibration output under:
+
+```text
+/srv/openscan-camera/sessions/<session_id>/<camera_id>/calibration/<calibration_id>/
+```
+
+That directory contains `calibration_manifest.json`, `suggested_controls.json`, `rpicam-vid.stderr.log`, and metadata or preview files when the backend can produce them.
+
 The service loads:
 
 - `/etc/openscan-camera-node/config.yaml`
 - `/etc/openscan-camera-node/profiles.yaml`
 
-`config.yaml` contains the node `camera_id` and may also contain `profile_overrides` for camera-specific values such as AWB gains and lens position.
+`config.yaml` contains the node `camera_id` and may also contain `profile_overrides` for camera-specific values such as AWB gains and lens position. It also has conservative calibration policy defaults:
+
+```yaml
+camera_control_policy:
+  use_calibration_suggestions: false
+  apply_suggestions_to_recording: false
+```
+
+Leave `apply_suggestions_to_recording` false unless you deliberately want the node to pass suggested lock values to `rpicam-vid`.
 
 The prepared state for a session/camera is written to:
 
@@ -211,6 +246,8 @@ The default profiles live in `examples/profiles.yml` and are installed onto each
 
 - `video_1080p25_auto`
 - `video_1080p25_locked`
+- `video_1080p25_calibrated_suggest`
+- `video_1080p25_auto_then_lock_experimental`
 - `video_1080p50_experimental_locked`
 - `timelapse_1080p6_locked`
 
@@ -243,9 +280,66 @@ camera_control_policy:
   prepare_warmup_seconds: 0
 ```
 
-For multicam consistency, AE/AWB should ideally warm up and then lock. With the current `rpicam-vid` subprocess backend, AE/AWB/AF lock values are not measured or applied by the service yet. The metadata is honest about this: for example, a requested `auto_then_lock` AWB policy is recorded as requested, but the actually applied backend behavior is recorded as `auto` with a warning.
+For multicam consistency, AE/AWB should ideally warm up and then lock. With the current `rpicam-vid` subprocess backend, this is only a partial foundation: calibration can capture metadata when available and prepare can link suggestions, but actual locks are applied only when explicitly requested and only for values observed in metadata. The metadata is honest about gaps with warnings.
 
 Avoid continuous autofocus for final takes unless it is explicitly needed. The `video_1080p50_experimental_locked` profile is for testing only.
+
+## Calibration and suggested locks
+
+Calibration runs are short `rpicam-vid` captures used to collect backend metadata and suggest stable manual values for later profiles or per-node overrides. With the current `rpicam-vid` backend, not all values may be available. The service only suggests values it actually observed in metadata. Missing values are written as `null` with warnings such as `Not available from rpicam-vid metadata on this backend`.
+
+Run a calibration pass across all configured nodes:
+
+```bash
+multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto
+multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto --duration 8
+multicam --nodes examples/nodes.yml calibration-status
+multicam --nodes examples/nodes.yml calibration-last
+multicam --nodes examples/nodes.yml calibration-suggestions
+```
+
+Recommended workflow:
+
+1. Start with an auto profile.
+2. Place a gray card or representative scene in view.
+3. Run `multicam calibrate`.
+4. Review suggested values and warnings.
+5. Copy good values into per-node overrides.
+6. Use a locked profile for real takes.
+
+Example override snippet:
+
+```yaml
+profile_overrides:
+  video_1080p25_locked:
+    camera_controls:
+      shutter_us: 10000
+      gain: 1.7
+      awbgains: [1.82, 1.41]
+      lens_position: 1.8
+```
+
+Suggestions are not automatically written back into `profiles.yaml` or Ansible host vars. `multicam calibration-suggestions` prints copyable snippets, but you decide what to keep.
+
+Experimental profiles can link suggestions during prepare:
+
+```yaml
+camera_control_policy:
+  exposure_mode: auto_then_lock
+  awb_mode: auto_then_lock
+  focus_mode: auto_then_lock
+  use_calibration_suggestions: true
+  apply_suggestions_to_recording: false
+```
+
+If suggestions are available and `reuse_prepared_controls` is true, `prepared_state.json` records the calibration id, manifest path, suggestion path, and a snapshot of the suggested controls. Actual recording still does not apply those values unless you explicitly allow it, for example:
+
+```bash
+multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto --apply-to-session
+multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25_auto_then_lock_experimental --apply-calibration-suggestions
+```
+
+Each take manifest records whether suggestions were linked and whether they were actually applied. `auto_then_lock` remains experimental until a Picamera2 backend can read and apply AE/AWB/AF controls reliably.
 
 ## Deterministic camera controls
 

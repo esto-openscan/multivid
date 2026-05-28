@@ -15,18 +15,21 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from . import __version__
+from .calibration import build_suggested_controls, parse_rpicam_metadata, suggestion_values
 from .config import CameraNodeConfig
 from .profiles import CameraControlPolicy, RecordingProfile, RecordingProfiles
 
 
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 TAKE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+CALIBRATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 AUTO_TAKE_ID_PATTERN = re.compile(r"^take_(\d{3})$")
 PROCESS_STOP_TIMEOUT_SECONDS = 10
 LOW_DISK_WARNING_BYTES = 500 * 1024 * 1024
 BACKEND_NAME = "rpicam-vid"
-MANIFEST_SCHEMA_VERSION = 3
-PREPARED_STATE_SCHEMA_VERSION = 2
+MANIFEST_SCHEMA_VERSION = 4
+PREPARED_STATE_SCHEMA_VERSION = 3
+CALIBRATION_MANIFEST_SCHEMA_VERSION = 1
 
 
 class RecorderError(Exception):
@@ -46,6 +49,10 @@ class InvalidSessionIdError(RecorderError):
 
 
 class InvalidTakeIdError(RecorderError):
+    pass
+
+
+class InvalidCalibrationIdError(RecorderError):
     pass
 
 
@@ -77,6 +84,8 @@ class RpicamVidRecorder:
         self._lifecycle_state = "idle"
         self._last_error: str | None = None
         self._last_recording_summary: dict[str, Any] | None = None
+        self._last_calibration_summary: dict[str, Any] | None = None
+        self._calibration_running = False
         self._prepared_state: dict[str, Any] | None = None
         self._hostname = socket.gethostname()
 
@@ -88,6 +97,7 @@ class RpicamVidRecorder:
         force_prepare: bool = False,
         refocus: bool = False,
         notes: str | None = None,
+        apply_calibration_suggestions: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
             try:
@@ -114,8 +124,28 @@ class RpicamVidRecorder:
                 if output_file.exists() or manifest_path.exists():
                     raise TakeAlreadyExistsError(f"take_id already exists for this camera: {resolved_take_id}")
 
-                command = self._build_command(profile, output_file)
-                applied_controls = _applied_controls_for_recording(profile, output_file)
+                calibration_context = _calibration_context_from_prepared_state(prepared_state)
+                suggestions_apply_allowed = _suggestions_apply_allowed(
+                    node_policy=self._config.camera_control_policy.as_dict(),
+                    profile=profile,
+                    start_requested=apply_calibration_suggestions,
+                )
+                suggestions_applied = suggestions_apply_allowed and calibration_context is not None
+                if suggestions_applied:
+                    prepared_state = dict(prepared_state)
+                    prepared_state["calibration_suggestions_applied_to_recording"] = True
+                    self._write_json(self._prepared_state_path(session_id), prepared_state)
+                    self._prepared_state = prepared_state
+                command = self._build_command(
+                    profile,
+                    output_file,
+                    calibration_context.get("suggested_controls_snapshot") if suggestions_applied else None,
+                )
+                applied_controls = _applied_controls_for_recording(
+                    profile,
+                    output_file,
+                    calibration_context.get("suggested_controls_snapshot") if suggestions_applied else None,
+                )
                 started_at_dt = _utc_now_dt()
                 started_at = _format_timestamp(started_at_dt)
                 usable_start_offset_seconds = profile.camera_control_policy.pre_roll_seconds
@@ -126,6 +156,12 @@ class RpicamVidRecorder:
                     warnings.append(
                         "refocus requested; rpicam-vid backend does not implement focus-value measurement or lock yet"
                     )
+                if calibration_context is not None and not suggestions_applied:
+                    warnings.append(
+                        "calibration suggestions are linked in prepared state but were not applied to recording"
+                    )
+                if apply_calibration_suggestions and calibration_context is None:
+                    warnings.append("apply_calibration_suggestions requested but no calibration suggestions were available")
 
                 manifest = {
                     "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -152,6 +188,18 @@ class RpicamVidRecorder:
                     "applied_controls": applied_controls,
                     "actually_applied_controls": applied_controls,
                     "unsupported_controls": profile.unsupported_controls,
+                    "calibration_id": calibration_context.get("calibration_id") if calibration_context else None,
+                    "calibration_manifest_path": (
+                        calibration_context.get("calibration_manifest_path") if calibration_context else None
+                    ),
+                    "suggested_controls_path": (
+                        calibration_context.get("suggested_controls_path") if calibration_context else None
+                    ),
+                    "calibration_suggestions_snapshot": (
+                        calibration_context.get("suggested_controls_snapshot") if calibration_context else None
+                    ),
+                    "calibration_suggestions_applied": suggestions_applied,
+                    "apply_calibration_suggestions_requested": apply_calibration_suggestions,
                     "recording_start_time": started_at,
                     "recording_stop_time": None,
                     "pre_roll_seconds": _clean_number(profile.camera_control_policy.pre_roll_seconds),
@@ -311,6 +359,111 @@ class RpicamVidRecorder:
             status["prepared_state_reset"] = reset
             return status
 
+    def run_calibration(
+        self,
+        session_id: str,
+        profile_name: str,
+        duration_seconds: float = 5.0,
+        calibration_id: str | None = None,
+        target: str | None = None,
+        notes: str | None = None,
+        apply_to_session: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            try:
+                self._finalize_if_process_exited_locked()
+                if self._state is not None and self._state.process.poll() is None:
+                    raise AlreadyRecordingError("cannot run calibration while a recording is running")
+                if self._calibration_running:
+                    raise RecorderError("calibration is already running")
+
+                self._validate_session_id(session_id)
+                profile = self._get_profile(profile_name)
+                resolved_calibration_id = calibration_id or _default_calibration_id()
+                self._validate_calibration_id(resolved_calibration_id)
+                if duration_seconds <= 0:
+                    raise RecorderError("duration_seconds must be > 0")
+
+                camera_session_dir = self._camera_session_dir(session_id)
+                calibration_dir = self._calibration_dir(session_id, resolved_calibration_id)
+                calibration_dir.mkdir(parents=True, exist_ok=False)
+                self._calibration_running = True
+                self._lifecycle_state = "calibrating"
+            except RecorderError as exc:
+                self._lifecycle_state = "error"
+                self._last_error = str(exc)
+                raise
+
+        try:
+            summary = self._run_calibration_unlocked(
+                session_id=session_id,
+                profile=profile,
+                duration_seconds=duration_seconds,
+                calibration_id=resolved_calibration_id,
+                target=target,
+                notes=notes,
+                apply_to_session=apply_to_session,
+                camera_session_dir=camera_session_dir,
+                calibration_dir=calibration_dir,
+            )
+        finally:
+            with self._lock:
+                self._calibration_running = False
+                if self._state is None and self._lifecycle_state == "calibrating":
+                    self._lifecycle_state = "armed" if self._prepared_state else "idle"
+
+        with self._lock:
+            self._last_calibration_summary = summary
+            self._write_json(self._last_calibration_path(session_id), summary)
+            if apply_to_session:
+                summary = self._activate_calibration_suggestions_locked(session_id, summary)
+            self._last_error = None
+            status = self._status_locked()
+            status["calibration"] = summary
+            return status
+
+    def calibration_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "camera_id": self._config.camera_id,
+                "hostname": self._hostname,
+                "running": self._calibration_running,
+                "last": self._read_last_calibration_summary(),
+            }
+
+    def calibration_last(self) -> dict[str, Any]:
+        with self._lock:
+            last = self._read_last_calibration_summary()
+            if last is None:
+                return {
+                    "camera_id": self._config.camera_id,
+                    "hostname": self._hostname,
+                    "last": None,
+                    "warnings": ["no calibration has been recorded on this node"],
+                }
+            return last
+
+    def apply_calibration_to_session(
+        self,
+        session_id: str,
+        calibration_id: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._validate_session_id(session_id)
+            if calibration_id is not None:
+                self._validate_calibration_id(calibration_id)
+            summary = self._calibration_summary_for_session(session_id, calibration_id)
+            active = self._activate_calibration_suggestions_locked(session_id, summary)
+            return {
+                "camera_id": self._config.camera_id,
+                "hostname": self._hostname,
+                "session_id": session_id,
+                "calibration_id": active.get("calibration_id"),
+                "active_suggested_controls_path": str(self._active_calibration_path(session_id)),
+                "suggested_controls": active.get("suggested_controls"),
+                "warnings": active.get("warnings", []),
+            }
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             self._finalize_if_process_exited_locked()
@@ -318,6 +471,194 @@ class RpicamVidRecorder:
 
     def profiles(self) -> dict[str, dict[str, Any]]:
         return self._profiles.as_dict()
+
+    def _run_calibration_unlocked(
+        self,
+        session_id: str,
+        profile: RecordingProfile,
+        duration_seconds: float,
+        calibration_id: str,
+        target: str | None,
+        notes: str | None,
+        apply_to_session: bool,
+        camera_session_dir: Path,
+        calibration_dir: Path,
+    ) -> dict[str, Any]:
+        started_at = _utc_now()
+        metadata_path = calibration_dir / "rpicam-vid.metadata.json"
+        preview_file = calibration_dir / f"preview.{profile.output_extension}"
+        stderr_path = calibration_dir / "rpicam-vid.stderr.log"
+        manifest_path = calibration_dir / "calibration_manifest.json"
+        suggested_controls_path = calibration_dir / "suggested_controls.json"
+
+        command = self._build_calibration_command(profile, preview_file, metadata_path, duration_seconds)
+        manifest: dict[str, Any] = {
+            "schema_version": CALIBRATION_MANIFEST_SCHEMA_VERSION,
+            "status": "running",
+            "session_id": session_id,
+            "camera_id": self._config.camera_id,
+            "hostname": self._hostname,
+            "service_version": __version__,
+            "backend": BACKEND_NAME,
+            "calibration_id": calibration_id,
+            "profile": profile.name,
+            "profile_snapshot": profile.as_dict(),
+            "duration_seconds": _clean_number(float(duration_seconds)),
+            "target": target,
+            "notes": notes,
+            "started_at": started_at,
+            "finished_at": None,
+            "output_dir": str(calibration_dir),
+            "metadata_path": str(metadata_path),
+            "preview_file_path": str(preview_file),
+            "suggested_controls_path": str(suggested_controls_path),
+            "apply_to_session_requested": apply_to_session,
+            "rpicam_vid_command": command,
+            "warnings": [],
+            "errors": [],
+            "exit_code": None,
+        }
+        self._write_json(manifest_path, manifest)
+
+        exit_code, stderr_text, final_command, metadata_requested = self._run_calibration_command(
+            command=command,
+            cwd=calibration_dir,
+            stderr_path=stderr_path,
+            duration_seconds=duration_seconds,
+            metadata_path=metadata_path,
+            preview_file=preview_file,
+            profile=profile,
+        )
+        metadata_result = parse_rpicam_metadata(metadata_path)
+        suggested_controls = build_suggested_controls(
+            metadata_result=metadata_result,
+            profile_name=profile.name,
+            profile_snapshot=profile.as_dict(),
+            camera_id=self._config.camera_id,
+            calibration_id=calibration_id,
+            calibration_manifest_path=manifest_path,
+        )
+        warnings = list(suggested_controls.get("warnings", []))
+        if not metadata_requested:
+            warnings.append("rpicam-vid metadata options were not accepted; calibration ran without metadata capture")
+        if exit_code != 0:
+            detail = _last_stderr_line(stderr_text) or f"exit code {exit_code}"
+            warnings.append(f"calibration command failed: {detail}")
+
+        suggested_controls["warnings"] = _dedupe(warnings)
+        self._write_json(suggested_controls_path, suggested_controls)
+
+        status = "completed" if exit_code == 0 else "failed"
+        manifest.update(
+            {
+                "status": status,
+                "finished_at": _utc_now(),
+                "exit_code": exit_code,
+                "rpicam_vid_command": final_command,
+                "metadata_requested": metadata_requested,
+                "metadata_produced": metadata_path.exists() and metadata_path.stat().st_size > 0,
+                "preview_produced": preview_file.exists() and preview_file.stat().st_size > 0,
+                "suggested_controls": suggested_controls,
+                "warnings": _dedupe(warnings),
+            }
+        )
+        if exit_code != 0:
+            manifest["errors"] = warnings[-1:]
+        self._write_json(manifest_path, manifest)
+
+        summary = {
+            "camera_id": self._config.camera_id,
+            "hostname": self._hostname,
+            "session_id": session_id,
+            "calibration_id": calibration_id,
+            "profile": profile.name,
+            "status": status,
+            "started_at": started_at,
+            "finished_at": manifest["finished_at"],
+            "duration_seconds": _clean_number(float(duration_seconds)),
+            "target": target,
+            "notes": notes,
+            "output_dir": str(calibration_dir),
+            "calibration_manifest_path": str(manifest_path),
+            "suggested_controls_path": str(suggested_controls_path),
+            "metadata_path": str(metadata_path) if manifest["metadata_produced"] else None,
+            "preview_file_path": str(preview_file) if manifest["preview_produced"] else None,
+            "suggested_controls": suggested_controls,
+            "confidence": suggested_controls.get("confidence"),
+            "warnings": manifest["warnings"],
+            "apply_to_session_requested": apply_to_session,
+            "active_for_session": False,
+            "session_calibration_dir": str(camera_session_dir / "calibration"),
+        }
+        return summary
+
+    def _run_calibration_command(
+        self,
+        command: list[str],
+        cwd: Path,
+        stderr_path: Path,
+        duration_seconds: float,
+        metadata_path: Path,
+        preview_file: Path,
+        profile: RecordingProfile,
+    ) -> tuple[int, str, list[str], bool]:
+        timeout = max(10.0, duration_seconds + 8.0)
+        with stderr_path.open("w", encoding="utf-8") as stderr_file:
+            try:
+                result = subprocess.run(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    cwd=cwd,
+                    timeout=timeout,
+                    check=False,
+                    text=True,
+                )
+            except subprocess.TimeoutExpired:
+                stderr_file.write(f"\ncalibration command timed out after {timeout:g} seconds\n")
+                return (
+                    -1,
+                    stderr_path.read_text(encoding="utf-8", errors="replace"),
+                    command,
+                    True,
+                )
+        stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        if result.returncode == 0 or not _looks_like_unsupported_metadata_option(stderr_text):
+            return result.returncode, stderr_text, command, True
+
+        fallback_command = self._build_calibration_command(
+            profile,
+            preview_file,
+            None,
+            duration_seconds,
+        )
+        metadata_path.unlink(missing_ok=True)
+        with stderr_path.open("a", encoding="utf-8") as stderr_file:
+            stderr_file.write("\n--- retrying without metadata options ---\n")
+            try:
+                fallback_result = subprocess.run(
+                    fallback_command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=stderr_file,
+                    cwd=cwd,
+                    timeout=timeout,
+                    check=False,
+                    text=True,
+                )
+            except subprocess.TimeoutExpired:
+                stderr_file.write(f"\ncalibration fallback command timed out after {timeout:g} seconds\n")
+                return (
+                    -1,
+                    stderr_path.read_text(encoding="utf-8", errors="replace"),
+                    fallback_command,
+                    False,
+                )
+        return (
+            fallback_result.returncode,
+            stderr_path.read_text(encoding="utf-8", errors="replace"),
+            fallback_command,
+            False,
+        )
 
     def _prepare_locked(
         self,
@@ -335,6 +676,7 @@ class RpicamVidRecorder:
             {
                 "camera_id": self._config.camera_id,
                 "backend": BACKEND_NAME,
+                "node_camera_control_policy": self._config.camera_control_policy.as_dict(),
                 "profile": profile.as_dict(),
             }
         )
@@ -349,6 +691,7 @@ class RpicamVidRecorder:
                 profile.camera_control_policy.reuse_prepared_controls
                 and existing_state is not None
                 and self._prepared_state_is_valid(existing_state, session_id, profile.name, config_hash)
+                and self._prepared_state_calibration_is_current(existing_state, session_id, profile)
             ):
                 if refocus:
                     existing_state = self._record_refocus_request(existing_state)
@@ -367,6 +710,17 @@ class RpicamVidRecorder:
         free_disk_bytes = self._free_disk_bytes()
         if free_disk_bytes is not None and free_disk_bytes < LOW_DISK_WARNING_BYTES:
             warnings.append(f"free disk space is low: {free_disk_bytes} bytes available")
+
+        calibration_context = self._calibration_context_for_prepare(session_id, profile)
+        if calibration_context is not None:
+            warnings.extend(calibration_context.get("warnings", []))
+        elif _profile_wants_calibration_suggestions(
+            node_policy=self._config.camera_control_policy.as_dict(),
+            profile=profile,
+        ):
+            warnings.append(
+                "calibration suggestions were requested for auto_then_lock prepare but no suggested_controls.json was available"
+            )
 
         warmup_performed = False
         warmup_command: list[str] | None = None
@@ -390,6 +744,7 @@ class RpicamVidRecorder:
                 valid=False,
                 errors=errors,
                 refocus=refocus,
+                calibration_context=calibration_context,
             )
             self._write_json(prepared_path, state)
             self._prepared_state = state
@@ -409,6 +764,7 @@ class RpicamVidRecorder:
             valid=True,
             errors=[],
             refocus=refocus,
+            calibration_context=calibration_context,
         )
         self._write_json(prepared_path, state)
         self._prepared_state = state
@@ -428,6 +784,7 @@ class RpicamVidRecorder:
         valid: bool,
         errors: list[str],
         refocus: bool,
+        calibration_context: dict[str, Any] | None,
     ) -> dict[str, Any]:
         policy = profile.camera_control_policy
         state: dict[str, Any] = {
@@ -451,6 +808,17 @@ class RpicamVidRecorder:
             "warmup_performed": warmup_performed,
             "warmup_command": warmup_command,
             "free_disk_bytes_at_prepare": free_disk_bytes,
+            "calibration_id": calibration_context.get("calibration_id") if calibration_context else None,
+            "calibration_manifest_path": (
+                calibration_context.get("calibration_manifest_path") if calibration_context else None
+            ),
+            "suggested_controls_path": (
+                calibration_context.get("suggested_controls_path") if calibration_context else None
+            ),
+            "suggested_controls_snapshot": (
+                calibration_context.get("suggested_controls_snapshot") if calibration_context else None
+            ),
+            "calibration_suggestions_applied_to_recording": False,
             "warnings": _dedupe(warnings),
             "errors": errors,
         }
@@ -495,8 +863,14 @@ class RpicamVidRecorder:
             raise RecorderError(f"prepare warmup command failed: {detail}")
         return command
 
-    def _build_command(self, profile: RecordingProfile, output_file: Path) -> list[str]:
+    def _build_command(
+        self,
+        profile: RecordingProfile,
+        output_file: Path,
+        suggested_controls: dict[str, Any] | None = None,
+    ) -> list[str]:
         command = [BACKEND_NAME, *profile.rpicam_vid_args]
+        _extend_command_with_suggestions(command, suggestion_values(suggested_controls))
         save_pts_path = _save_pts_path(profile, output_file)
         if save_pts_path is not None and not _contains_option(command, "--save-pts"):
             command.extend(["--save-pts", save_pts_path])
@@ -504,6 +878,38 @@ class RpicamVidRecorder:
             command.extend(["--output", str(output_file)])
         if not _contains_option(command, "--timeout", "-t"):
             command.extend(["--timeout", "0"])
+        return command
+
+    def _build_calibration_command(
+        self,
+        profile: RecordingProfile,
+        preview_file: Path,
+        metadata_path: Path | None,
+        duration_seconds: float,
+    ) -> list[str]:
+        args = _drop_options(
+            profile.rpicam_vid_args,
+            "--output",
+            "-o",
+            "--timeout",
+            "-t",
+            "--save-pts",
+            "--shutter",
+            "--gain",
+            "--awbgains",
+            "--autofocus-mode",
+            "--lens-position",
+        )
+        command = [
+            BACKEND_NAME,
+            *args,
+            "--output",
+            str(preview_file),
+            "--timeout",
+            str(max(1, int(duration_seconds * 1000))),
+        ]
+        if metadata_path is not None:
+            command.extend(["--metadata", str(metadata_path), "--metadata-format", "json"])
         return command
 
     def _status_locked(self) -> dict[str, Any]:
@@ -534,6 +940,11 @@ class RpicamVidRecorder:
             "process_pid": self._state.process.pid if recording_running and self._state else None,
             "free_disk_bytes": self._free_disk_bytes(),
             "service_version": __version__,
+            "node_camera_control_policy": self._config.camera_control_policy.as_dict(),
+            "calibration_running": self._calibration_running,
+            "last_calibration_id": (
+                self._last_calibration_summary.get("calibration_id") if self._last_calibration_summary else None
+            ),
             "resolved_controls": control_status.get("resolved_controls"),
             "applied_controls": control_status.get("applied_controls"),
             "planned_applied_controls": control_status.get("planned_applied_controls"),
@@ -625,6 +1036,25 @@ class RpicamVidRecorder:
             and prepared_state.get("config_hash") == config_hash
         )
 
+    def _prepared_state_calibration_is_current(
+        self,
+        prepared_state: dict[str, Any],
+        session_id: str,
+        profile: RecordingProfile,
+    ) -> bool:
+        if not _profile_wants_calibration_suggestions(
+            node_policy=self._config.camera_control_policy.as_dict(),
+            profile=profile,
+        ):
+            return True
+        summary = self._calibration_summary_for_session(session_id, None, allow_missing=True)
+        if summary is None:
+            return prepared_state.get("suggested_controls_snapshot") is None
+        return (
+            prepared_state.get("calibration_id") == summary.get("calibration_id")
+            and prepared_state.get("suggested_controls_path") == summary.get("suggested_controls_path")
+        )
+
     def _read_prepared_state(self, path: Path) -> tuple[dict[str, Any] | None, str | None]:
         if not path.exists():
             return None, None
@@ -642,6 +1072,107 @@ class RpicamVidRecorder:
 
     def _prepared_state_path(self, session_id: str) -> Path:
         return self._camera_session_dir(session_id) / "prepared_state.json"
+
+    def _calibration_root(self, session_id: str) -> Path:
+        return self._camera_session_dir(session_id) / "calibration"
+
+    def _calibration_dir(self, session_id: str, calibration_id: str) -> Path:
+        return self._calibration_root(session_id) / calibration_id
+
+    def _last_calibration_path(self, session_id: str) -> Path:
+        return self._calibration_root(session_id) / "last.json"
+
+    def _active_calibration_path(self, session_id: str) -> Path:
+        return self._calibration_root(session_id) / "active_suggestions.json"
+
+    def _calibration_context_for_prepare(
+        self,
+        session_id: str,
+        profile: RecordingProfile,
+    ) -> dict[str, Any] | None:
+        if not _profile_wants_calibration_suggestions(
+            node_policy=self._config.camera_control_policy.as_dict(),
+            profile=profile,
+        ):
+            return None
+        summary = self._calibration_summary_for_session(session_id, None, allow_missing=True)
+        if summary is None:
+            return None
+        suggestions = summary.get("suggested_controls")
+        if not isinstance(suggestions, dict):
+            return None
+        values = suggestion_values(suggestions)
+        warnings = list(summary.get("warnings", []))
+        if not values:
+            warnings.append("calibration suggestions were found but no lockable values were available")
+        return {
+            "calibration_id": summary.get("calibration_id"),
+            "calibration_manifest_path": summary.get("calibration_manifest_path"),
+            "suggested_controls_path": summary.get("suggested_controls_path"),
+            "suggested_controls_snapshot": suggestions,
+            "warnings": warnings,
+        }
+
+    def _calibration_summary_for_session(
+        self,
+        session_id: str,
+        calibration_id: str | None,
+        allow_missing: bool = False,
+    ) -> dict[str, Any] | None:
+        if calibration_id is not None:
+            path = self._calibration_dir(session_id, calibration_id) / "suggested_controls.json"
+            manifest_path = self._calibration_dir(session_id, calibration_id) / "calibration_manifest.json"
+            if not path.exists():
+                if allow_missing:
+                    return None
+                raise RecorderError(f"calibration suggestions not found: {calibration_id}")
+            suggestions = self._read_json(path)
+            manifest = self._read_json(manifest_path) if manifest_path.exists() else {}
+            return {
+                "camera_id": self._config.camera_id,
+                "hostname": self._hostname,
+                "session_id": session_id,
+                "calibration_id": calibration_id,
+                "profile": suggestions.get("profile"),
+                "status": manifest.get("status", "unknown"),
+                "calibration_manifest_path": str(manifest_path),
+                "suggested_controls_path": str(path),
+                "suggested_controls": suggestions,
+                "confidence": suggestions.get("confidence"),
+                "warnings": suggestions.get("warnings", []),
+            }
+
+        for path in (self._active_calibration_path(session_id), self._last_calibration_path(session_id)):
+            if path.exists():
+                data = self._read_json(path)
+                if isinstance(data, dict):
+                    return data
+        if allow_missing:
+            return None
+        raise RecorderError(f"no calibration suggestions found for session: {session_id}")
+
+    def _activate_calibration_suggestions_locked(self, session_id: str, summary: dict[str, Any]) -> dict[str, Any]:
+        active = dict(summary)
+        active["active_for_session"] = True
+        active["activated_at"] = _utc_now()
+        self._write_json(self._active_calibration_path(session_id), active)
+        self._last_calibration_summary = active
+        return active
+
+    def _read_last_calibration_summary(self) -> dict[str, Any] | None:
+        if self._last_calibration_summary is not None:
+            return self._last_calibration_summary
+        root = self._config.output_root
+        if not root.exists():
+            return None
+        candidates = sorted(root.glob(f"*/{self._config.camera_id}/calibration/last.json"), key=lambda path: path.stat().st_mtime)
+        if not candidates:
+            return None
+        try:
+            self._last_calibration_summary = self._read_json(candidates[-1])
+        except RecorderError:
+            return None
+        return self._last_calibration_summary
 
     def _get_profile(self, profile_name: str) -> RecordingProfile:
         profile = self._profiles.get(profile_name)
@@ -663,6 +1194,13 @@ class RpicamVidRecorder:
                 "take_id must start with an alphanumeric character and contain only letters, numbers, dots, underscores, or hyphens"
             )
 
+    @staticmethod
+    def _validate_calibration_id(calibration_id: str) -> None:
+        if CALIBRATION_ID_PATTERN.fullmatch(calibration_id) is None:
+            raise InvalidCalibrationIdError(
+                "calibration_id must start with an alphanumeric character and contain only letters, numbers, dots, underscores, or hyphens"
+            )
+
     def _free_disk_bytes(self) -> int | None:
         path = self._config.output_root
         while not path.exists() and path.parent != path:
@@ -674,11 +1212,23 @@ class RpicamVidRecorder:
 
     @staticmethod
     def _write_json(path: Path, data: dict[str, Any]) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = path.with_suffix(f"{path.suffix}.tmp")
         with temp_path.open("w", encoding="utf-8") as json_file:
             json.dump(data, json_file, indent=2, sort_keys=True)
             json_file.write("\n")
         temp_path.replace(path)
+
+    @staticmethod
+    def _read_json(path: Path) -> dict[str, Any]:
+        try:
+            with path.open("r", encoding="utf-8") as json_file:
+                data = json.load(json_file)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecorderError(f"could not read JSON file {path}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RecorderError(f"JSON file {path} was not an object")
+        return data
 
 
 def _contains_option(command: list[str], *options: str) -> bool:
@@ -707,8 +1257,16 @@ def _drop_options(args: list[str], *options: str) -> list[str]:
     return dropped
 
 
-def _applied_controls_for_recording(profile: RecordingProfile, output_file: Path | None = None) -> dict[str, Any]:
+def _applied_controls_for_recording(
+    profile: RecordingProfile,
+    output_file: Path | None = None,
+    suggested_controls: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     applied = dict(profile.planned_applied_controls)
+    suggested_values = suggestion_values(suggested_controls)
+    if suggested_values:
+        applied.update(_applied_controls_from_suggestion_values(suggested_values))
+        applied["calibration_suggestions_applied"] = True
     save_pts_path = _save_pts_path(profile, output_file)
     if save_pts_path is not None and not _contains_option([BACKEND_NAME, *profile.rpicam_vid_args], "--save-pts"):
         applied["save_pts"] = save_pts_path
@@ -723,6 +1281,34 @@ def _warmup_applied_controls(profile: RecordingProfile) -> dict[str, Any]:
     applied.pop("timeout_ms", None)
     if applied:
         applied["backend"] = BACKEND_NAME
+    return applied
+
+
+def _extend_command_with_suggestions(command: list[str], values: dict[str, Any]) -> None:
+    shutter_us = values.get("shutter_us")
+    if shutter_us is not None and not _contains_option(command, "--shutter"):
+        command.extend(["--shutter", str(shutter_us)])
+    gain = values.get("gain")
+    if gain is not None and not _contains_option(command, "--gain"):
+        command.extend(["--gain", str(gain)])
+    awbgains = values.get("awbgains")
+    if isinstance(awbgains, list) and len(awbgains) == 2 and not _contains_option(command, "--awbgains"):
+        command.extend(["--awbgains", ",".join(str(item) for item in awbgains)])
+    lens_position = values.get("lens_position")
+    if lens_position is not None:
+        if not _contains_option(command, "--autofocus-mode"):
+            command.extend(["--autofocus-mode", "manual"])
+        if not _contains_option(command, "--lens-position"):
+            command.extend(["--lens-position", str(lens_position)])
+
+
+def _applied_controls_from_suggestion_values(values: dict[str, Any]) -> dict[str, Any]:
+    applied: dict[str, Any] = {}
+    for key in ("shutter_us", "gain", "awbgains", "lens_position"):
+        if values.get(key) is not None:
+            applied[key] = values[key]
+    if values.get("lens_position") is not None:
+        applied["autofocus_mode"] = "manual"
     return applied
 
 
@@ -790,12 +1376,51 @@ def _control_status(
     return {}
 
 
+def _profile_wants_calibration_suggestions(node_policy: dict[str, Any], profile: RecordingProfile) -> bool:
+    policy = profile.camera_control_policy
+    if not (
+        policy.exposure_mode == "auto_then_lock"
+        or policy.awb_mode == "auto_then_lock"
+        or policy.focus_mode == "auto_then_lock"
+    ):
+        return False
+    return bool(node_policy.get("use_calibration_suggestions") or policy.use_calibration_suggestions)
+
+
+def _suggestions_apply_allowed(
+    node_policy: dict[str, Any],
+    profile: RecordingProfile,
+    start_requested: bool,
+) -> bool:
+    return bool(
+        start_requested
+        or profile.camera_control_policy.apply_suggestions_to_recording
+        or node_policy.get("apply_suggestions_to_recording")
+    )
+
+
+def _calibration_context_from_prepared_state(prepared_state: dict[str, Any]) -> dict[str, Any] | None:
+    suggestions = prepared_state.get("suggested_controls_snapshot")
+    if not isinstance(suggestions, dict):
+        return None
+    return {
+        "calibration_id": prepared_state.get("calibration_id"),
+        "calibration_manifest_path": prepared_state.get("calibration_manifest_path"),
+        "suggested_controls_path": prepared_state.get("suggested_controls_path"),
+        "suggested_controls_snapshot": suggestions,
+    }
+
+
 def _backend_policy_warnings(policy: CameraControlPolicy, refocus: bool) -> list[str]:
     warnings: list[str] = []
     if policy.exposure_mode == "auto_then_lock" or policy.awb_mode == "auto_then_lock":
-        warnings.append("AE/AWB lock not implemented for rpicam-vid backend yet; requested lock will run as auto")
+        warnings.append(
+            "AE/AWB auto_then_lock is experimental on rpicam-vid; lock values require calibration suggestions and explicit apply"
+        )
     if policy.focus_mode == "auto_then_lock" or refocus:
-        warnings.append("AF lock/refocus not implemented for rpicam-vid backend yet")
+        warnings.append(
+            "AF auto_then_lock/refocus is experimental on rpicam-vid; focus values require metadata support and explicit apply"
+        )
     if policy.focus_mode == "continuous":
         warnings.append("continuous autofocus requested; avoid for final takes unless intentionally configured")
     return warnings
@@ -828,3 +1453,23 @@ def _format_timestamp(value: datetime) -> str:
 
 def _utc_now() -> str:
     return _format_timestamp(_utc_now_dt())
+
+
+def _default_calibration_id() -> str:
+    return "cal_" + _utc_now_dt().strftime("%Y%m%dT%H%M%SZ")
+
+
+def _looks_like_unsupported_metadata_option(stderr_text: str) -> bool:
+    lowered = stderr_text.lower()
+    return "metadata" in lowered and (
+        "unrecognised" in lowered
+        or "unrecognized" in lowered
+        or "unknown option" in lowered
+        or "invalid option" in lowered
+        or "unexpected" in lowered
+    )
+
+
+def _last_stderr_line(stderr_text: str) -> str | None:
+    lines = [line.strip() for line in stderr_text.splitlines() if line.strip()]
+    return lines[-1] if lines else None

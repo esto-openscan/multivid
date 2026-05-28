@@ -26,6 +26,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_parser.add_argument("--take", dest="take_id", help="Take id to record into")
     start_parser.add_argument("--force-prepare", action="store_true", help="Recreate prepared state before recording")
     start_parser.add_argument("--refocus", action="store_true", help="Request focus-related prepare behavior")
+    start_parser.add_argument(
+        "--apply-calibration-suggestions",
+        action="store_true",
+        help="Explicitly apply linked calibration suggestions to this recording",
+    )
 
     prepare_parser = subparsers.add_parser("prepare", help="Prepare all nodes for a session/profile")
     prepare_parser.add_argument("--session", required=True, help="Session id to prepare")
@@ -35,6 +40,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     prepare_reset_parser = subparsers.add_parser("prepare-reset", help="Clear prepared state for a session")
     prepare_reset_parser.add_argument("--session", required=True, help="Session id whose prepared state should be cleared")
+
+    calibrate_parser = subparsers.add_parser("calibrate", help="Run a short calibration capture on all nodes")
+    calibrate_parser.add_argument("--session", required=True, help="Session id to calibrate into")
+    calibrate_parser.add_argument("--profile", required=True, help="Recording profile name")
+    calibrate_parser.add_argument("--duration", type=float, default=5.0, help="Calibration duration in seconds")
+    calibrate_parser.add_argument("--calibration-id", help="Optional calibration id")
+    calibrate_parser.add_argument("--target", help="Optional target label, such as gray_card or scene")
+    calibrate_parser.add_argument("--notes", help="Optional operator note")
+    calibrate_parser.add_argument(
+        "--apply-to-session",
+        action="store_true",
+        help="Mark the resulting suggestions as active for this session",
+    )
+
+    subparsers.add_parser("calibration-status", help="Show calibration status for all nodes")
+    subparsers.add_parser("calibration-last", help="Show the last calibration result for all nodes")
+    subparsers.add_parser("calibration-suggestions", help="Show copyable per-node calibration suggestions")
 
     subparsers.add_parser("stop", help="Stop recording on all nodes")
     return parser
@@ -56,7 +78,10 @@ def main(argv: list[str] | None = None) -> int:
 
 
 async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> list[NodeResult]:
-    timeout = httpx.Timeout(args.timeout)
+    timeout_seconds = args.timeout
+    if args.command == "calibrate":
+        timeout_seconds = max(args.timeout, float(args.duration) + 20.0)
+    timeout = httpx.Timeout(timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if args.command == "status":
             tasks = [request_node(client, node, "GET", "/status") for node in nodes]
@@ -70,6 +95,8 @@ async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> lis
                 body["force_prepare"] = True
             if args.refocus:
                 body["refocus"] = True
+            if args.apply_calibration_suggestions:
+                body["apply_calibration_suggestions"] = True
             tasks = [request_node(client, node, "POST", "/recordings/start", body) for node in nodes]
         elif args.command == "prepare":
             body = {"session_id": args.session, "profile": args.profile}
@@ -81,6 +108,24 @@ async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> lis
         elif args.command == "prepare-reset":
             body = {"session_id": args.session}
             tasks = [request_node(client, node, "POST", "/prepare/reset", body) for node in nodes]
+        elif args.command == "calibrate":
+            body = {
+                "session_id": args.session,
+                "profile": args.profile,
+                "duration_seconds": args.duration,
+                "apply_to_session": args.apply_to_session,
+            }
+            if args.calibration_id:
+                body["calibration_id"] = args.calibration_id
+            if args.target:
+                body["target"] = args.target
+            if args.notes:
+                body["notes"] = args.notes
+            tasks = [request_node(client, node, "POST", "/calibration/run", body) for node in nodes]
+        elif args.command == "calibration-status":
+            tasks = [request_node(client, node, "GET", "/calibration/status") for node in nodes]
+        elif args.command in {"calibration-last", "calibration-suggestions"}:
+            tasks = [request_node(client, node, "GET", "/calibration/last") for node in nodes]
         elif args.command == "stop":
             tasks = [request_node(client, node, "POST", "/recordings/stop") for node in nodes]
         else:
@@ -89,6 +134,11 @@ async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> lis
 
 
 def _print_results(command: str, results: list[NodeResult]) -> None:
+    if command in {"calibrate", "calibration-status", "calibration-last", "calibration-suggestions"}:
+        _print_calibration_results(command, results)
+        _print_failure_summary(results)
+        return
+
     if command == "profiles":
         for result in results:
             prefix = f"{result.node.name} ({result.node.camera_id})"
@@ -125,6 +175,87 @@ def _print_results(command: str, results: list[NodeResult]) -> None:
     for row in rows:
         print("  ".join(str(row[column]).ljust(widths[column]) for column in columns))
     _print_failure_summary(results)
+
+
+def _print_calibration_results(command: str, results: list[NodeResult]) -> None:
+    for result in results:
+        prefix = f"{result.node.name} ({result.node.camera_id})"
+        if not result.ok:
+            status = f"HTTP {result.status_code}" if result.status_code is not None else "offline"
+            print(f"{prefix}: FAILED [{status}] {result.error}")
+            continue
+
+        data = result.data or {}
+        if command == "calibration-status":
+            last = data.get("last") if isinstance(data.get("last"), dict) else {}
+            running = data.get("running", False)
+            calibration_id = last.get("calibration_id") if isinstance(last, dict) else None
+            print(f"{prefix}: OK running={running} last={_value(calibration_id)}")
+            continue
+
+        summary = data.get("calibration") if isinstance(data.get("calibration"), dict) else data
+        print(_format_calibration_summary(prefix, summary, show_yaml=command == "calibration-suggestions"))
+
+
+def _format_calibration_summary(prefix: str, summary: dict[str, Any], show_yaml: bool = False) -> str:
+    if not summary or summary.get("last") is None and "suggested_controls" not in summary:
+        return f"{prefix}: no calibration recorded"
+    suggestions = summary.get("suggested_controls")
+    if not isinstance(suggestions, dict):
+        suggestions = {}
+    controls = suggestions.get("suggested_controls")
+    if not isinstance(controls, dict):
+        controls = {}
+
+    lines = [
+        f"{prefix}: {summary.get('status', 'OK')} calibration={_value(summary.get('calibration_id'))} "
+        f"profile={_value(summary.get('profile'))} confidence={_value(summary.get('confidence') or suggestions.get('confidence'))}"
+    ]
+    for field in ("shutter_us", "gain", "awbgains", "lens_position"):
+        item = controls.get(field)
+        value = item.get("value") if isinstance(item, dict) else None
+        label = field if field != "shutter_us" else "shutter_us"
+        lines.append(f"  suggested {label}: {_format_suggested_value(value)}")
+    warnings = summary.get("warnings") or suggestions.get("warnings") or []
+    if isinstance(warnings, list) and warnings:
+        lines.append("  warnings:")
+        lines.extend(f"    - {warning}" for warning in warnings)
+    if show_yaml:
+        yaml_lines = _calibration_yaml_snippet(result_camera_id=summary.get("camera_id"), controls=controls)
+        if yaml_lines:
+            lines.append("  per-node override snippet:")
+            lines.extend(f"    {line}" if line else "" for line in yaml_lines)
+    return "\n".join(lines)
+
+
+def _format_suggested_value(value: Any) -> str:
+    if value is None:
+        return "unavailable"
+    if isinstance(value, list) and len(value) == 2:
+        return f"[{value[0]}, {value[1]}]"
+    return str(value)
+
+
+def _calibration_yaml_snippet(result_camera_id: Any, controls: dict[str, Any]) -> list[str]:
+    values: dict[str, Any] = {}
+    for field, item in controls.items():
+        if isinstance(item, dict) and item.get("value") is not None:
+            values[field] = item["value"]
+    if not values:
+        return []
+    lines = ["profile_overrides:", "  video_1080p25_locked:", "    camera_controls:"]
+    for field in ("shutter_us", "gain", "awbgains", "lens_position"):
+        if field in values:
+            lines.append(f"      {field}: {_yaml_value(values[field])}")
+    if result_camera_id:
+        lines.append(f"# camera_id: {result_camera_id}")
+    return lines
+
+
+def _yaml_value(value: Any) -> str:
+    if isinstance(value, list):
+        return "[" + ", ".join(str(item) for item in value) + "]"
+    return str(value)
 
 
 def _format_profiles(data: dict[str, Any] | None) -> str:

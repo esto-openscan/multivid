@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from openscan_camera_node.config import CameraNodeConfig
+from openscan_camera_node.config import CameraNodeConfig, NodeCameraControlPolicy
 from openscan_camera_node.profiles import load_recording_profiles
 from openscan_camera_node.recorder import RpicamVidRecorder
 
@@ -111,6 +111,65 @@ class RecorderTests(unittest.TestCase):
         self.assertTrue(prepared_state["valid"])
         self.assertEqual(prepared_state["planned_applied_controls"]["shutter_us"], 20000)
 
+    def test_prepare_links_calibration_suggestions_and_start_applies_only_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_calibration_recorder(Path(temp_dir))
+            missing = recorder.prepare("session-1", "calibrated")
+
+            camera_dir = Path(temp_dir) / "sessions" / "session-1" / "cam-a"
+            calibration_dir = camera_dir / "calibration" / "cal-1"
+            calibration_dir.mkdir(parents=True)
+            suggestions = {
+                "source": "rpicam-vid metadata",
+                "confidence": "medium",
+                "camera_id": "cam-a",
+                "calibration_id": "cal-1",
+                "profile": "calibrated",
+                "suggested_controls": {
+                    "shutter_us": {"value": 10000, "source_field": "ExposureTime", "warning": None},
+                    "gain": {"value": 1.7, "source_field": "AnalogueGain", "warning": None},
+                    "awbgains": {"value": [1.82, 1.41], "source_field": "ColourGains", "warning": None},
+                    "lens_position": {"value": None, "source_field": None, "warning": "missing"},
+                },
+                "warnings": ["focus metadata unavailable from rpicam-vid"],
+            }
+            (calibration_dir / "suggested_controls.json").write_text(json.dumps(suggestions), encoding="utf-8")
+            last = {
+                "camera_id": "cam-a",
+                "session_id": "session-1",
+                "calibration_id": "cal-1",
+                "profile": "calibrated",
+                "status": "completed",
+                "calibration_manifest_path": str(calibration_dir / "calibration_manifest.json"),
+                "suggested_controls_path": str(calibration_dir / "suggested_controls.json"),
+                "suggested_controls": suggestions,
+                "confidence": "medium",
+                "warnings": suggestions["warnings"],
+            }
+            (camera_dir / "calibration" / "last.json").write_text(json.dumps(last), encoding="utf-8")
+
+            prepared = recorder.prepare("session-1", "calibrated", force=True)
+            process = FakeProcess(pid=11111)
+            with (
+                patch("openscan_camera_node.recorder.subprocess.Popen", return_value=process),
+                patch("openscan_camera_node.recorder.os.killpg"),
+            ):
+                recorder.start("session-1", "calibrated", apply_calibration_suggestions=True)
+                recorder.stop()
+
+            manifest = json.loads((camera_dir / "take_001" / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertIn("no suggested_controls.json was available", "\n".join(missing["prepared_state"]["warnings"]))
+        self.assertEqual(prepared["prepared_state"]["calibration_id"], "cal-1")
+        self.assertEqual(
+            prepared["prepared_state"]["suggested_controls_snapshot"]["suggested_controls"]["shutter_us"]["value"],
+            10000,
+        )
+        self.assertTrue(manifest["calibration_suggestions_applied"])
+        self.assertEqual(manifest["applied_controls"]["shutter_us"], 10000)
+        self.assertIn("--shutter", manifest["rpicam_vid_command"])
+        self.assertIn("10000", manifest["rpicam_vid_command"])
+
 
 def _new_recorder(root: Path) -> RpicamVidRecorder:
     profiles_path = root / "profiles.yml"
@@ -153,6 +212,54 @@ profiles:
         listen_port=8080,
         output_root=root / "sessions",
         profile_overrides={},
+        camera_control_policy=NodeCameraControlPolicy(
+            use_calibration_suggestions=False,
+            apply_suggestions_to_recording=False,
+        ),
+    )
+    return RpicamVidRecorder(config=config, profiles=load_recording_profiles(profiles_path))
+
+
+def _new_calibration_recorder(root: Path) -> RpicamVidRecorder:
+    profiles_path = root / "profiles.yml"
+    profiles_path.write_text(
+        """
+profiles:
+  calibrated:
+    output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      nopreview: true
+    camera_controls:
+      shutter_us: null
+      gain: null
+      awbgains: null
+      autofocus_mode: null
+      lens_position: null
+    camera_control_policy:
+      exposure_mode: auto_then_lock
+      awb_mode: auto_then_lock
+      focus_mode: auto_then_lock
+      reuse_prepared_controls: true
+      use_calibration_suggestions: true
+      apply_suggestions_to_recording: false
+""",
+        encoding="utf-8",
+    )
+    config = CameraNodeConfig(
+        camera_id="cam-a",
+        listen_host="127.0.0.1",
+        listen_port=8080,
+        output_root=root / "sessions",
+        profile_overrides={},
+        camera_control_policy=NodeCameraControlPolicy(
+            use_calibration_suggestions=False,
+            apply_suggestions_to_recording=False,
+        ),
     )
     return RpicamVidRecorder(config=config, profiles=load_recording_profiles(profiles_path))
 

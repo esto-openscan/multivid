@@ -13,6 +13,7 @@ from .config import default_profiles_path, load_camera_node_config
 from .profiles import load_recording_profiles
 from .recorder import (
     AlreadyRecordingError,
+    InvalidCalibrationIdError,
     InvalidSessionIdError,
     InvalidTakeIdError,
     RecorderError,
@@ -32,6 +33,7 @@ class StartRecordingRequest(BaseModel):
     force_prepare: bool = False
     refocus: bool = False
     notes: str | None = None
+    apply_calibration_suggestions: bool = False
 
 
 class PrepareRequest(BaseModel):
@@ -43,6 +45,21 @@ class PrepareRequest(BaseModel):
 
 class PrepareResetRequest(BaseModel):
     session_id: str = Field(min_length=1)
+
+
+class CalibrationRunRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    profile: str = Field(min_length=1)
+    duration_seconds: float = Field(default=5, gt=0)
+    calibration_id: str | None = None
+    target: str | None = None
+    notes: str | None = None
+    apply_to_session: bool = False
+
+
+class CalibrationApplyRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    calibration_id: str | None = None
 
 
 def create_app(config_path: str | Path | None = None, profiles_path: str | Path | None = None) -> FastAPI:
@@ -86,6 +103,7 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
                 force_prepare=request.force_prepare,
                 refocus=request.refocus,
                 notes=request.notes,
+                apply_calibration_suggestions=request.apply_calibration_suggestions,
             )
         except AlreadyRecordingError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -129,6 +147,53 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
         except AlreadyRecordingError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except InvalidSessionIdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RecorderError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.post("/calibration/run", status_code=202)
+    def calibration_run(request: CalibrationRunRequest) -> dict[str, Any]:
+        try:
+            return recorder.run_calibration(
+                session_id=request.session_id,
+                profile_name=request.profile,
+                duration_seconds=request.duration_seconds,
+                calibration_id=request.calibration_id,
+                target=request.target,
+                notes=request.notes,
+                apply_to_session=request.apply_to_session,
+            )
+        except AlreadyRecordingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (InvalidCalibrationIdError, InvalidSessionIdError, UnknownProfileError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except FileExistsError as exc:
+            raise HTTPException(status_code=409, detail="calibration_id already exists for this camera") from exc
+        except RecorderError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        except FileNotFoundError as exc:
+            logger.exception("rpicam-vid was not found")
+            raise HTTPException(status_code=500, detail="rpicam-vid was not found on this node") from exc
+        except Exception as exc:
+            logger.exception("failed to run calibration")
+            raise HTTPException(status_code=500, detail="failed to run calibration") from exc
+
+    @app.get("/calibration/status")
+    def calibration_status() -> dict[str, Any]:
+        return recorder.calibration_status()
+
+    @app.get("/calibration/last")
+    def calibration_last() -> dict[str, Any]:
+        return recorder.calibration_last()
+
+    @app.post("/calibration/apply-to-session")
+    def calibration_apply_to_session(request: CalibrationApplyRequest) -> dict[str, Any]:
+        try:
+            return recorder.apply_calibration_to_session(
+                session_id=request.session_id,
+                calibration_id=request.calibration_id,
+            )
+        except (InvalidCalibrationIdError, InvalidSessionIdError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except RecorderError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc

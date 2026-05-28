@@ -4,7 +4,7 @@ nodes:
     base_url: http://multivid-cam-front.local:8080
   - name: cam-side
     camera_id: side
-    base_url: http://multivid-cam-front.local:8080
+    base_url: http://multivid-cam-side.local:8080
   - name: cam-top
     camera_id: top
     base_url: http://multivid-cam-top.local:8080

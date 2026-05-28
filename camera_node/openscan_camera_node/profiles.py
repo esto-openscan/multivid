@@ -19,6 +19,8 @@ CAMERA_CONTROL_POLICY_FIELDS = {
     "reuse_prepared_controls",
     "refocus_on_each_take",
     "prepare_warmup_seconds",
+    "use_calibration_suggestions",
+    "apply_suggestions_to_recording",
 }
 PROFILE_FIELDS = {
     "description",
@@ -63,6 +65,8 @@ class CameraControlPolicy:
     reuse_prepared_controls: bool
     refocus_on_each_take: bool
     prepare_warmup_seconds: float
+    use_calibration_suggestions: bool
+    apply_suggestions_to_recording: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -73,6 +77,8 @@ class CameraControlPolicy:
             "reuse_prepared_controls": self.reuse_prepared_controls,
             "refocus_on_each_take": self.refocus_on_each_take,
             "prepare_warmup_seconds": _clean_number(self.prepare_warmup_seconds),
+            "use_calibration_suggestions": self.use_calibration_suggestions,
+            "apply_suggestions_to_recording": self.apply_suggestions_to_recording,
         }
 
 
@@ -429,6 +435,20 @@ def _parse_camera_control_policy(
             ),
             refocus_on_each_take=_read_bool(raw_policy, "refocus_on_each_take", False, path, profile_name),
             prepare_warmup_seconds=_read_seconds(raw_policy, "prepare_warmup_seconds", 0.0, path, profile_name),
+            use_calibration_suggestions=_read_bool(
+                raw_policy,
+                "use_calibration_suggestions",
+                False,
+                path,
+                profile_name,
+            ),
+            apply_suggestions_to_recording=_read_bool(
+                raw_policy,
+                "apply_suggestions_to_recording",
+                False,
+                path,
+                profile_name,
+            ),
         ),
         unsupported,
         warnings,

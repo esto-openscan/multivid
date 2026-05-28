@@ -13,12 +13,25 @@ DEFAULT_PROFILES_PATH = "/etc/openscan-camera-node/profiles.yaml"
 
 
 @dataclass(frozen=True)
+class NodeCameraControlPolicy:
+    use_calibration_suggestions: bool
+    apply_suggestions_to_recording: bool
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "use_calibration_suggestions": self.use_calibration_suggestions,
+            "apply_suggestions_to_recording": self.apply_suggestions_to_recording,
+        }
+
+
+@dataclass(frozen=True)
 class CameraNodeConfig:
     camera_id: str
     listen_host: str
     listen_port: int
     output_root: Path
     profile_overrides: dict[str, Any]
+    camera_control_policy: NodeCameraControlPolicy
 
 
 def default_config_path() -> Path:
@@ -38,6 +51,7 @@ def load_camera_node_config(path: str | Path | None = None) -> CameraNodeConfig:
     listen_port = int(raw_config.get("listen_port", 8080))
     output_root = Path(str(raw_config.get("output_root", "/srv/openscan-camera/sessions")))
     profile_overrides = _profile_overrides(raw_config.get("profile_overrides", {}), config_path)
+    camera_control_policy = _camera_control_policy(raw_config.get("camera_control_policy", {}), config_path)
 
     if listen_port < 1 or listen_port > 65535:
         raise ValueError(f"{config_path}: listen_port must be between 1 and 65535")
@@ -48,6 +62,7 @@ def load_camera_node_config(path: str | Path | None = None) -> CameraNodeConfig:
         listen_port=listen_port,
         output_root=output_root,
         profile_overrides=profile_overrides,
+        camera_control_policy=camera_control_policy,
     )
 
 
@@ -82,3 +97,39 @@ def _profile_overrides(raw_value: Any, path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: profile_overrides.{profile_name} must be a mapping")
         overrides[profile_name] = override
     return overrides
+
+
+def _camera_control_policy(raw_value: Any, path: Path) -> NodeCameraControlPolicy:
+    if raw_value is None:
+        raw_value = {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{path}: camera_control_policy must be a mapping")
+    return NodeCameraControlPolicy(
+        use_calibration_suggestions=_read_bool(
+            raw_value,
+            "use_calibration_suggestions",
+            False,
+            path,
+            "camera_control_policy",
+        ),
+        apply_suggestions_to_recording=_read_bool(
+            raw_value,
+            "apply_suggestions_to_recording",
+            False,
+            path,
+            "camera_control_policy",
+        ),
+    )
+
+
+def _read_bool(raw: dict[str, Any], key: str, default: bool, path: Path, section: str) -> bool:
+    value = raw.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1", "on"}:
+            return True
+        if normalized in {"false", "no", "0", "off"}:
+            return False
+    raise ValueError(f"{path}: {section}.{key} must be true or false")

@@ -41,6 +41,8 @@ profiles:
         self.assertEqual(profile.camera_control_policy.focus_mode, "auto")
         self.assertTrue(profile.camera_control_policy.reuse_prepared_controls)
         self.assertFalse(profile.camera_control_policy.refocus_on_each_take)
+        self.assertFalse(profile.camera_control_policy.use_calibration_suggestions)
+        self.assertFalse(profile.camera_control_policy.apply_suggestions_to_recording)
         self.assertEqual(profile.unsupported_camera_control_policy["unsupported_future_field"], "keep-me-visible")
         self.assertIn("unsupported camera_control_policy field", profile.warnings[0])
 

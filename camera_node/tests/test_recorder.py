@@ -92,11 +92,24 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(second_status["current_take_id"], "take_002")
         self.assertEqual(manifest["session_id"], "session-1")
         self.assertEqual(manifest["take_id"], "take_001")
+        self.assertEqual(manifest["output_file_name"], "recording.h264")
         self.assertEqual(manifest["pre_roll_seconds"], 5)
         self.assertFalse(manifest["prepared_state_reused"])
         self.assertTrue(second_manifest["prepared_state_reused"])
-        self.assertEqual(manifest["actually_applied_controls"]["awb_mode"], "auto")
+        self.assertEqual(manifest["resolved_controls"]["camera_controls"]["awbgains"], [1.75, 1.42])
+        self.assertEqual(manifest["applied_controls"]["shutter_us"], 20000)
+        self.assertEqual(manifest["applied_controls"]["awbgains"], [1.75, 1.42])
+        self.assertEqual(manifest["applied_controls"]["lens_position"], 1.8)
+        self.assertEqual(manifest["actually_applied_controls"], manifest["applied_controls"])
+        self.assertIn("--codec", manifest["rpicam_vid_command"])
+        self.assertIn("h264", manifest["rpicam_vid_command"])
+        self.assertIn("--inline", manifest["rpicam_vid_command"])
+        self.assertNotIn("--libav-format", manifest["rpicam_vid_command"])
+        self.assertIn("--shutter", manifest["rpicam_vid_command"])
+        self.assertIn("--awbgains", manifest["rpicam_vid_command"])
+        self.assertIn("1.75,1.42", manifest["rpicam_vid_command"])
         self.assertTrue(prepared_state["valid"])
+        self.assertEqual(prepared_state["planned_applied_controls"]["shutter_us"], 20000)
 
 
 def _new_recorder(root: Path) -> RpicamVidRecorder:
@@ -107,20 +120,30 @@ profiles:
   video:
     description: Test video
     output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      container: null
+      nopreview: true
+    camera_controls:
+      shutter_us: 20000
+      gain: 1.5
+      awbgains: [1.75, 1.42]
+      autofocus_mode: manual
+      lens_position: 1.8
     camera_control_policy:
       pre_roll_seconds: 5
-      exposure_mode: auto
-      awb_mode: auto_then_lock
-      focus_mode: auto
+      exposure_mode: manual
+      awb_mode: manual
+      focus_mode: manual
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
-    rpicam_vid_args:
-      - --width
-      - "1920"
-      - --height
-      - "1080"
-      - --nopreview
+    rpicam_vid_extra_args:
+      - --inline
 """,
         encoding="utf-8",
     )
@@ -129,6 +152,7 @@ profiles:
         listen_host="127.0.0.1",
         listen_port=8080,
         output_root=root / "sessions",
+        profile_overrides={},
     )
     return RpicamVidRecorder(config=config, profiles=load_recording_profiles(profiles_path))
 

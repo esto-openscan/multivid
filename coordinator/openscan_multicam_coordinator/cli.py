@@ -101,7 +101,21 @@ def _print_results(command: str, results: list[NodeResult]) -> None:
         return
 
     rows = [_result_row(result) for result in results]
-    columns = ["node", "camera", "result", "state", "prepared", "recording", "session", "take", "profile", "output", "error"]
+    columns = [
+        "node",
+        "camera",
+        "result",
+        "state",
+        "prepared",
+        "recording",
+        "session",
+        "take",
+        "profile",
+        "controls",
+        "output",
+        "warnings",
+        "error",
+    ]
     widths = {
         column: max(len(column), *(len(str(row[column])) for row in rows))
         for column in columns
@@ -116,7 +130,12 @@ def _print_results(command: str, results: list[NodeResult]) -> None:
 def _format_profiles(data: dict[str, Any] | None) -> str:
     if not data or not isinstance(data.get("profiles"), dict):
         return "none"
-    return ", ".join(sorted(data["profiles"].keys()))
+    parts = []
+    for name, profile in sorted(data["profiles"].items()):
+        profile_data = profile if isinstance(profile, dict) else {}
+        summary = _format_controls_summary(profile_data.get("resolved_controls") or profile_data)
+        parts.append(f"{name} [{summary}]" if summary and summary != "-" else name)
+    return "; ".join(parts)
 
 
 def _result_row(result: NodeResult) -> dict[str, str]:
@@ -132,8 +151,10 @@ def _result_row(result: NodeResult) -> dict[str, str]:
             "recording": _value(data.get("recording_running")),
             "session": _value(data.get("current_session_id")),
             "take": _value(data.get("current_take_id")),
-            "profile": _value(data.get("current_profile")),
+            "profile": _status_profile(data),
+            "controls": _format_controls_summary(data.get("resolved_controls")),
             "output": _value(data.get("output_path")),
+            "warnings": _format_warnings(data.get("warnings")),
             "error": result.error or "",
         }
 
@@ -146,8 +167,10 @@ def _result_row(result: NodeResult) -> dict[str, str]:
         "recording": _value(data.get("recording_running")),
         "session": _value(data.get("current_session_id")),
         "take": _value(data.get("current_take_id")),
-        "profile": _value(data.get("current_profile")),
+        "profile": _status_profile(data),
+        "controls": _format_controls_summary(data.get("resolved_controls")),
         "output": _value(data.get("output_path")),
+        "warnings": _format_warnings(data.get("warnings")),
         "error": _value(data.get("last_error"), empty=""),
     }
 
@@ -160,6 +183,66 @@ def _format_prepared(data: dict[str, Any]) -> str:
         return "-"
     valid_marker = "valid" if valid else "invalid"
     return f"{session_id or '-'}/{profile or '-'}:{valid_marker}"
+
+
+def _status_profile(data: dict[str, Any]) -> str:
+    return _value(data.get("current_profile") or data.get("prepared_profile") or data.get("last_profile"))
+
+
+def _format_controls_summary(data: Any) -> str:
+    if not isinstance(data, dict):
+        return "-"
+    recording = data.get("recording") if isinstance(data.get("recording"), dict) else {}
+    camera_controls = data.get("camera_controls") if isinstance(data.get("camera_controls"), dict) else {}
+
+    parts: list[str] = []
+    width = recording.get("width")
+    height = recording.get("height")
+    framerate = recording.get("framerate")
+    if width and height and framerate:
+        parts.append(f"{width}x{height}@{framerate}")
+    elif width and height:
+        parts.append(f"{width}x{height}")
+    elif framerate:
+        parts.append(f"{framerate}fps")
+
+    bitrate = recording.get("bitrate")
+    if bitrate:
+        parts.append(f"{bitrate}bps")
+
+    shutter_us = camera_controls.get("shutter_us")
+    if shutter_us:
+        parts.append(f"shutter={shutter_us}us")
+    gain = camera_controls.get("gain")
+    if gain:
+        parts.append(f"gain={gain}")
+    awbgains = camera_controls.get("awbgains")
+    if awbgains:
+        parts.append(f"awb={_format_pair(awbgains)}")
+    autofocus_mode = camera_controls.get("autofocus_mode")
+    lens_position = camera_controls.get("lens_position")
+    if autofocus_mode and lens_position is not None:
+        parts.append(f"focus={autofocus_mode}:{lens_position}")
+    elif autofocus_mode:
+        parts.append(f"focus={autofocus_mode}")
+    elif lens_position is not None:
+        parts.append(f"lens={lens_position}")
+
+    return ", ".join(parts) if parts else "-"
+
+
+def _format_pair(value: Any) -> str:
+    if isinstance(value, list) and len(value) == 2:
+        return f"{value[0]},{value[1]}"
+    return str(value)
+
+
+def _format_warnings(value: Any) -> str:
+    if not isinstance(value, list) or not value:
+        return ""
+    if len(value) == 1:
+        return str(value[0])
+    return f"{len(value)} warnings: {value[0]}"
 
 
 def _value(value: Any, empty: str = "-") -> str:

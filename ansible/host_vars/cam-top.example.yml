@@ -1,2 +1,15 @@
 camera_id: top
 openscan_camera_node_listen_port: 8080
+openscan_camera_node_profile_overrides:
+  video_1080p25_locked:
+    camera_controls:
+      awbgains: [1.70, 1.48]
+      lens_position: 3.2
+  video_1080p50_experimental_locked:
+    camera_controls:
+      awbgains: [1.70, 1.48]
+      lens_position: 3.2
+  timelapse_1080p6_locked:
+    camera_controls:
+      awbgains: [1.70, 1.48]
+      lens_position: 3.2

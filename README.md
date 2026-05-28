@@ -94,7 +94,7 @@ The example config also enables Arducam's Pivariety installer with `openscan_ard
    ```bash
    multicam --nodes examples/nodes.yml status
    multicam --nodes examples/nodes.yml profiles
-   multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25
+   multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25_auto
    multicam --nodes examples/nodes.yml stop
    ```
 
@@ -121,7 +121,7 @@ Start requests use this JSON body:
 ```json
 {
   "session_id": "test-001",
-  "profile": "video_1080p25",
+  "profile": "video_1080p25_auto",
   "take_id": "take_001",
   "force_prepare": false,
   "refocus": false,
@@ -136,7 +136,7 @@ Prepare requests use this JSON body:
 ```json
 {
   "session_id": "test-001",
-  "profile": "video_1080p25",
+  "profile": "video_1080p25_auto",
   "force": false,
   "refocus": false
 }
@@ -154,6 +154,8 @@ The service loads:
 
 - `/etc/openscan-camera-node/config.yaml`
 - `/etc/openscan-camera-node/profiles.yaml`
+
+`config.yaml` contains the node `camera_id` and may also contain `profile_overrides` for camera-specific values such as AWB gains and lens position.
 
 The prepared state for a session/camera is written to:
 
@@ -194,24 +196,39 @@ Normal user flow:
 During prepare, the MVP validates the selected profile, creates/checks output paths, records disk space, records the requested camera-control policy, and optionally runs a short `rpicam-vid` warmup when `prepare_warmup_seconds` is greater than zero. The normal coordinator path does not need to call prepare explicitly, but these debugging commands are available:
 
 ```bash
-multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25
-multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25 --force
+multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25_auto
+multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25_auto --force
 multicam --nodes examples/nodes.yml prepare-reset --session test-001
 ```
 
-Status output includes state, prepared session/profile validity, recording session/take/profile, output path, PID, last error, free disk space, and service version.
+Status output includes state, backend, prepared session/profile validity, recording session/take/profile, output path, PID, last error, free disk space, service version, resolved controls, applied controls, unsupported controls, and warnings.
 
-Each take manifest includes the session, take, camera, hostname, service version, profile snapshot, prepared-state snapshot, requested camera policy, actually applied controls where known, start/stop times, pre-roll seconds, usable start offset/time, output file path, command, PID, exit code, warnings, and errors.
+Each take manifest includes the session, take, camera, hostname, service version, profile snapshot after node overrides, prepared-state snapshot, requested controls, resolved controls, controls actually passed to `rpicam-vid`, unsupported controls, start/stop times, pre-roll seconds, usable start offset/time, output file path, full command, PID, exit code, warnings, and errors.
 
 ## Recording Profiles
 
 The default profiles live in `examples/profiles.yml` and are installed onto each node by Ansible:
 
-- `video_1080p25`
-- `video_1080p50_experimental`
-- `timelapse_1080p6`
+- `video_1080p25_auto`
+- `video_1080p25_locked`
+- `video_1080p50_experimental_locked`
+- `timelapse_1080p6_locked`
 
-Profiles are intentionally thin wrappers around `rpicam-vid` arguments. The service appends `--output <file>` and `--timeout 0` unless the profile already provides those options.
+Profiles use structured `recording`, `camera_controls`, and `camera_control_policy` blocks. The service translates known structured values into `rpicam-vid` arguments, then appends `--output <file>` and `--timeout 0` unless the profile already provides those options. Use `rpicam_vid_extra_args` for advanced flags that are not modeled yet.
+
+The default profiles write `recording.h264` files by using the `rpicam-vid` hardware H.264 encoder:
+
+```yaml
+output_extension: h264
+recording:
+  codec: h264
+rpicam_vid_extra_args:
+  - --inline
+```
+
+The `.h264` extension is intentional: `rpicam-vid --codec h264` writes a raw H.264 elementary stream, not an MP4 container. For this MVP the nodes prioritize reliable capture with minimal muxing overhead. Remux to MP4 later on a stronger machine when needed, without re-encoding the video stream.
+
+Do not set `output_extension: mp4` on a raw `--codec h264` profile. That produces a mislabeled raw H.264 bitstream, not an MP4 container. MP4 should only be used for an explicit container profile, for example with `--codec libav` and an MP4 libav format.
 
 Profiles also support `camera_control_policy`:
 
@@ -228,7 +245,25 @@ camera_control_policy:
 
 For multicam consistency, AE/AWB should ideally warm up and then lock. With the current `rpicam-vid` subprocess backend, AE/AWB/AF lock values are not measured or applied by the service yet. The metadata is honest about this: for example, a requested `auto_then_lock` AWB policy is recorded as requested, but the actually applied backend behavior is recorded as `auto` with a warning.
 
-Avoid continuous autofocus for final takes unless it is explicitly needed. The `video_1080p50_experimental` profile is for testing only.
+Avoid continuous autofocus for final takes unless it is explicitly needed. The `video_1080p50_experimental_locked` profile is for testing only.
+
+## Deterministic camera controls
+
+Auto profiles are useful for quick tests. Locked profiles are recommended for multicam consistency because each node receives explicit `rpicam-vid` arguments for the controls configured in the resolved profile.
+
+For consistent colors across cameras, set manual `awbgains`. For consistent motion blur, set fixed `shutter_us`. For consistent brightness and noise, set fixed `gain`. For fixed camera setups, avoid continuous autofocus and use `autofocus_mode: manual` with a per-node `lens_position`.
+
+Per-node overrides are expected because camera modules and physical angles differ. Ansible renders these into `/etc/openscan-camera-node/config.yaml`:
+
+```yaml
+profile_overrides:
+  video_1080p25_locked:
+    camera_controls:
+      awbgains: [1.75, 1.42]
+      lens_position: 1.8
+```
+
+The resolved profile snapshot is stored in each `manifest.json`. `requested_controls` records the profile intent, `resolved_controls` records the values after node overrides, and `applied_controls` only records controls that the service actually passed as `rpicam-vid` arguments. Unknown or future fields are preserved under `unsupported_controls` with warnings instead of being silently treated as applied.
 
 ## What this MVP intentionally does not do yet
 

@@ -44,6 +44,96 @@ profiles:
         self.assertEqual(profile.unsupported_camera_control_policy["unsupported_future_field"], "keep-me-visible")
         self.assertIn("unsupported camera_control_policy field", profile.warnings[0])
 
+    def test_structured_recording_controls_and_node_overrides_build_rpicam_args(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "profiles.yml"
+            path.write_text(
+                """
+profiles:
+  locked:
+    description: Locked profile
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      container: null
+      nopreview: true
+      level: "4.2"
+    camera_controls:
+      shutter_us: 20000
+      gain: 1.5
+      awbgains: null
+      autofocus_mode: manual
+      lens_position: null
+    camera_control_policy:
+      exposure_mode: manual
+      awb_mode: manual
+      focus_mode: manual
+""",
+                encoding="utf-8",
+            )
+
+            profiles = load_recording_profiles(
+                path,
+                profile_overrides={
+                    "locked": {
+                        "camera_controls": {
+                            "awbgains": [1.75, 1.42],
+                            "lens_position": 1.8,
+                        }
+                    }
+                },
+            )
+            profile = profiles.get("locked")
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertEqual(profile.output_extension, "h264")
+        self.assertEqual(profile.camera_controls["awbgains"], [1.75, 1.42])
+        self.assertEqual(profile.camera_controls["lens_position"], 1.8)
+        self.assertIn("--codec", profile.rpicam_vid_args)
+        self.assertIn("h264", profile.rpicam_vid_args)
+        self.assertNotIn("--libav-format", profile.rpicam_vid_args)
+        self.assertIn("--shutter", profile.rpicam_vid_args)
+        self.assertIn("20000", profile.rpicam_vid_args)
+        self.assertIn("--awbgains", profile.rpicam_vid_args)
+        self.assertIn("1.75,1.42", profile.rpicam_vid_args)
+        self.assertIn("--lens-position", profile.rpicam_vid_args)
+        self.assertEqual(profile.planned_applied_controls["awbgains"], [1.75, 1.42])
+        self.assertEqual(profile.planned_applied_controls["lens_position"], 1.8)
+        self.assertEqual(profile.warnings, [])
+
+    def test_incomplete_manual_lock_generates_clear_warnings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "profiles.yml"
+            path.write_text(
+                """
+profiles:
+  incomplete:
+    camera_control_policy:
+      exposure_mode: manual
+      awb_mode: manual
+      focus_mode: manual
+    camera_controls:
+      shutter_us: 20000
+      autofocus_mode: auto
+""",
+                encoding="utf-8",
+            )
+
+            profiles = load_recording_profiles(path)
+            profile = profiles.get("incomplete")
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        warnings = "\n".join(profile.warnings)
+        self.assertIn("camera_controls.gain is missing", warnings)
+        self.assertIn("camera_controls.awbgains is missing", warnings)
+        self.assertIn("camera_controls.autofocus_mode is not manual", warnings)
+        self.assertIn("camera_controls.lens_position is missing", warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

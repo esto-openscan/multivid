@@ -47,7 +47,10 @@ class PrepareResetRequest(BaseModel):
 
 def create_app(config_path: str | Path | None = None, profiles_path: str | Path | None = None) -> FastAPI:
     config = load_camera_node_config(config_path)
-    profiles = load_recording_profiles(profiles_path or default_profiles_path())
+    profiles = load_recording_profiles(
+        profiles_path or default_profiles_path(),
+        profile_overrides=config.profile_overrides,
+    )
     recorder = RpicamVidRecorder(config=config, profiles=profiles)
 
     app = FastAPI(title="OpenScan Camera Node", version=__version__)
@@ -71,7 +74,7 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
 
     @app.get("/profiles")
     def list_profiles() -> dict[str, Any]:
-        return {"profiles": recorder.profiles()}
+        return {"profiles_scope": "resolved_for_node", "profiles": recorder.profiles()}
 
     @app.post("/recordings/start", status_code=202)
     def start_recording(request: StartRecordingRequest) -> dict[str, Any]:

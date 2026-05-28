@@ -1,75 +1,137 @@
 profiles:
-  video_1080p25:
-    description: 1080p H.264 video at 25 fps
+  video_1080p25_auto:
+    description: 1080p raw H.264 elementary stream at 25 fps with automatic camera controls
     output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      container: null
+      duration: null
+      nopreview: true
+      save_pts: false
+    camera_controls:
+      shutter_us: null
+      gain: null
+      awbgains: null
+      autofocus_mode: null
+      lens_position: null
+      denoise: null
+      ev: null
+      metering: null
+      awb: null
     camera_control_policy:
       pre_roll_seconds: 5
       exposure_mode: auto
-      awb_mode: auto_then_lock
+      awb_mode: auto
       focus_mode: auto
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
-    rpicam_vid_args:
-      - --width
-      - "1920"
-      - --height
-      - "1080"
-      - --framerate
-      - "25"
-      - --codec
-      - h264
-      - --bitrate
-      - "12000000"
+    rpicam_vid_extra_args:
       - --inline
-      - --nopreview
 
-  video_1080p50_experimental:
-    description: 1080p H.264 video at 50 fps; useful for testing only
+  video_1080p25_locked:
+    description: 1080p raw H.264 elementary stream at 25 fps with fixed exposure, gain, AWB gains, and manual focus
     output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 25
+      bitrate: 12000000
+      codec: h264
+      container: null
+      duration: null
+      nopreview: true
+      save_pts: false
+    camera_controls:
+      shutter_us: 20000
+      gain: 1.5
+      awbgains: null
+      autofocus_mode: manual
+      lens_position: null
+      denoise: null
+      ev: null
+      metering: null
+      awb: null
     camera_control_policy:
       pre_roll_seconds: 5
-      exposure_mode: auto
-      awb_mode: auto_then_lock
-      focus_mode: auto
+      exposure_mode: manual
+      awb_mode: manual
+      focus_mode: manual
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
-    rpicam_vid_args:
-      - --width
-      - "1920"
-      - --height
-      - "1080"
-      - --framerate
-      - "50"
-      - --codec
-      - h264
-      - --bitrate
-      - "20000000"
+    rpicam_vid_extra_args:
       - --inline
-      - --nopreview
 
-  timelapse_1080p6:
-    description: Simple low-framerate 1080p H.264 capture at 6 fps
+  video_1080p50_experimental_locked:
+    description: 1080p raw H.264 elementary stream at 50 fps with fixed camera controls; useful for testing only
     output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 50
+      bitrate: 20000000
+      codec: h264
+      container: null
+      duration: null
+      nopreview: true
+      level: "4.2"
+      save_pts: true
+    camera_controls:
+      shutter_us: 10000
+      gain: 1.5
+      awbgains: null
+      autofocus_mode: manual
+      lens_position: null
+      denoise: null
+      ev: null
+      metering: null
+      awb: null
     camera_control_policy:
       pre_roll_seconds: 5
-      exposure_mode: auto
-      awb_mode: auto_then_lock
-      focus_mode: auto
+      exposure_mode: manual
+      awb_mode: manual
+      focus_mode: manual
       reuse_prepared_controls: true
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
-    rpicam_vid_args:
-      - --width
-      - "1920"
-      - --height
-      - "1080"
-      - --framerate
-      - "6"
-      - --codec
-      - h264
-      - --bitrate
-      - "6000000"
+    rpicam_vid_extra_args:
       - --inline
-      - --nopreview
+
+  timelapse_1080p6_locked:
+    description: Low-framerate 1080p raw H.264 elementary stream at 6 fps with fixed camera controls
+    output_extension: h264
+    recording:
+      width: 1920
+      height: 1080
+      framerate: 6
+      bitrate: 6000000
+      codec: h264
+      container: null
+      duration: null
+      nopreview: true
+      save_pts: false
+    camera_controls:
+      shutter_us: 30000
+      gain: 1.5
+      awbgains: null
+      autofocus_mode: manual
+      lens_position: null
+      denoise: null
+      ev: null
+      metering: null
+      awb: null
+    camera_control_policy:
+      pre_roll_seconds: 5
+      exposure_mode: manual
+      awb_mode: manual
+      focus_mode: manual
+      reuse_prepared_controls: true
+      refocus_on_each_take: false
+      prepare_warmup_seconds: 0
+    rpicam_vid_extra_args:
+      - --inline

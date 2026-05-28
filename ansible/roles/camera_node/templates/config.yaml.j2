@@ -2,3 +2,5 @@ camera_id: "{{ camera_id }}"
 listen_host: "{{ openscan_camera_node_listen_host }}"
 listen_port: {{ openscan_camera_node_listen_port }}
 output_root: "{{ openscan_sessions_root }}"
+profile_overrides:
+{{ openscan_camera_node_profile_overrides | default({}) | to_nice_yaml(indent=2, sort_keys=False) | indent(2, true) }}

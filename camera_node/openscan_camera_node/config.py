@@ -18,6 +18,7 @@ class CameraNodeConfig:
     listen_host: str
     listen_port: int
     output_root: Path
+    profile_overrides: dict[str, Any]
 
 
 def default_config_path() -> Path:
@@ -36,6 +37,7 @@ def load_camera_node_config(path: str | Path | None = None) -> CameraNodeConfig:
     listen_host = str(raw_config.get("listen_host", "0.0.0.0"))
     listen_port = int(raw_config.get("listen_port", 8080))
     output_root = Path(str(raw_config.get("output_root", "/srv/openscan-camera/sessions")))
+    profile_overrides = _profile_overrides(raw_config.get("profile_overrides", {}), config_path)
 
     if listen_port < 1 or listen_port > 65535:
         raise ValueError(f"{config_path}: listen_port must be between 1 and 65535")
@@ -45,6 +47,7 @@ def load_camera_node_config(path: str | Path | None = None) -> CameraNodeConfig:
         listen_host=listen_host,
         listen_port=listen_port,
         output_root=output_root,
+        profile_overrides=profile_overrides,
     )
 
 
@@ -62,3 +65,20 @@ def _required_string(config: dict[str, Any], key: str, path: Path) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{path}: {key} must be a non-empty string")
     return value.strip()
+
+
+def _profile_overrides(raw_value: Any, path: Path) -> dict[str, Any]:
+    if raw_value is None:
+        return {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{path}: profile_overrides must be a mapping")
+    overrides: dict[str, Any] = {}
+    for profile_name, override in raw_value.items():
+        if not isinstance(profile_name, str) or not profile_name.strip():
+            raise ValueError(f"{path}: profile_overrides keys must be non-empty strings")
+        if override is None:
+            continue
+        if not isinstance(override, dict):
+            raise ValueError(f"{path}: profile_overrides.{profile_name} must be a mapping")
+        overrides[profile_name] = override
+    return overrides

@@ -25,8 +25,8 @@ AUTO_TAKE_ID_PATTERN = re.compile(r"^take_(\d{3})$")
 PROCESS_STOP_TIMEOUT_SECONDS = 10
 LOW_DISK_WARNING_BYTES = 500 * 1024 * 1024
 BACKEND_NAME = "rpicam-vid"
-MANIFEST_SCHEMA_VERSION = 2
-PREPARED_STATE_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = 3
+PREPARED_STATE_SCHEMA_VERSION = 2
 
 
 class RecorderError(Exception):
@@ -76,6 +76,7 @@ class RpicamVidRecorder:
         self._state: RecordingState | None = None
         self._lifecycle_state = "idle"
         self._last_error: str | None = None
+        self._last_recording_summary: dict[str, Any] | None = None
         self._prepared_state: dict[str, Any] | None = None
         self._hostname = socket.gethostname()
 
@@ -114,6 +115,7 @@ class RpicamVidRecorder:
                     raise TakeAlreadyExistsError(f"take_id already exists for this camera: {resolved_take_id}")
 
                 command = self._build_command(profile, output_file)
+                applied_controls = _applied_controls_for_recording(profile, output_file)
                 started_at_dt = _utc_now_dt()
                 started_at = _format_timestamp(started_at_dt)
                 usable_start_offset_seconds = profile.camera_control_policy.pre_roll_seconds
@@ -134,7 +136,9 @@ class RpicamVidRecorder:
                     "hostname": self._hostname,
                     "service_version": __version__,
                     "backend": BACKEND_NAME,
+                    "backend_details": {"name": BACKEND_NAME, "version": None},
                     "profile": profile_name,
+                    "profile_snapshot": profile.as_dict(),
                     "profile_settings": profile.as_dict(),
                     "prepared_state": prepared_state,
                     "prepared_state_reused": prepared_reused,
@@ -143,7 +147,11 @@ class RpicamVidRecorder:
                     "effective_refocus_requested": refocus or profile.camera_control_policy.refocus_on_each_take,
                     "notes": notes,
                     "requested_camera_control_policy": profile.camera_control_policy.as_dict(),
-                    "actually_applied_controls": prepared_state.get("applied_controls"),
+                    "requested_controls": profile.requested_controls(),
+                    "resolved_controls": profile.resolved_controls(),
+                    "applied_controls": applied_controls,
+                    "actually_applied_controls": applied_controls,
+                    "unsupported_controls": profile.unsupported_controls,
                     "recording_start_time": started_at,
                     "recording_stop_time": None,
                     "pre_roll_seconds": _clean_number(profile.camera_control_policy.pre_roll_seconds),
@@ -161,6 +169,7 @@ class RpicamVidRecorder:
                     "errors": [],
                 }
                 self._write_json(manifest_path, manifest)
+                self._last_recording_summary = _recording_summary_from_manifest(manifest)
 
                 stderr_file = (take_dir / "rpicam-vid.stderr.log").open("ab")
                 try:
@@ -182,6 +191,7 @@ class RpicamVidRecorder:
                         }
                     )
                     self._write_json(manifest_path, manifest)
+                    self._last_recording_summary = _recording_summary_from_manifest(manifest)
                     self._lifecycle_state = "error"
                     self._last_error = str(exc)
                     raise
@@ -189,6 +199,7 @@ class RpicamVidRecorder:
                 manifest["status"] = "recording"
                 manifest["process_pid"] = process.pid
                 self._write_json(manifest_path, manifest)
+                self._last_recording_summary = _recording_summary_from_manifest(manifest)
 
                 self._state = RecordingState(
                     session_id=session_id,
@@ -432,8 +443,11 @@ class RpicamVidRecorder:
             "hostname": self._hostname,
             "service_version": __version__,
             "camera_control_policy": policy.as_dict(),
-            "requested_controls": _requested_controls(policy),
-            "applied_controls": _applied_controls(policy),
+            "requested_controls": profile.requested_controls(),
+            "resolved_controls": profile.resolved_controls(),
+            "planned_applied_controls": _applied_controls_for_recording(profile),
+            "applied_controls": _warmup_applied_controls(profile) if warmup_performed else {},
+            "unsupported_controls": profile.unsupported_controls,
             "warmup_performed": warmup_performed,
             "warmup_command": warmup_command,
             "free_disk_bytes_at_prepare": free_disk_bytes,
@@ -460,7 +474,7 @@ class RpicamVidRecorder:
         timeout_seconds = profile.camera_control_policy.prepare_warmup_seconds
         command = [
             BACKEND_NAME,
-            *_drop_options(profile.rpicam_vid_args, "--output", "-o", "--timeout", "-t"),
+            *_drop_options(profile.rpicam_vid_args, "--output", "-o", "--timeout", "-t", "--save-pts"),
             "--output",
             os.devnull,
             "--timeout",
@@ -483,6 +497,9 @@ class RpicamVidRecorder:
 
     def _build_command(self, profile: RecordingProfile, output_file: Path) -> list[str]:
         command = [BACKEND_NAME, *profile.rpicam_vid_args]
+        save_pts_path = _save_pts_path(profile, output_file)
+        if save_pts_path is not None and not _contains_option(command, "--save-pts"):
+            command.extend(["--save-pts", save_pts_path])
         if not _contains_option(command, "--output", "-o"):
             command.extend(["--output", str(output_file)])
         if not _contains_option(command, "--timeout", "-t"):
@@ -494,11 +511,14 @@ class RpicamVidRecorder:
         prepared_state = self._prepared_state
         if prepared_state is None and self._state is not None:
             prepared_state = self._state.manifest.get("prepared_state")
+        active_manifest = self._state.manifest if self._state is not None else None
+        control_status = _control_status(active_manifest, self._last_recording_summary, prepared_state)
 
         return {
             "camera_id": self._config.camera_id,
             "hostname": self._hostname,
             "node_hostname": self._hostname,
+            "backend": BACKEND_NAME,
             "state": self._lifecycle_state,
             "recording_running": recording_running,
             "recording": recording_running,
@@ -514,6 +534,14 @@ class RpicamVidRecorder:
             "process_pid": self._state.process.pid if recording_running and self._state else None,
             "free_disk_bytes": self._free_disk_bytes(),
             "service_version": __version__,
+            "resolved_controls": control_status.get("resolved_controls"),
+            "applied_controls": control_status.get("applied_controls"),
+            "planned_applied_controls": control_status.get("planned_applied_controls"),
+            "unsupported_controls": control_status.get("unsupported_controls"),
+            "warnings": control_status.get("warnings", []),
+            "last_session_id": control_status.get("last_session_id"),
+            "last_take_id": control_status.get("last_take_id"),
+            "last_profile": control_status.get("last_profile"),
         }
 
     def _finalize_if_process_exited_locked(self) -> None:
@@ -560,6 +588,7 @@ class RpicamVidRecorder:
             manifest["errors"] = [*manifest.get("errors", []), error]
         self._state.manifest = manifest
         self._write_json(self._state.manifest_path, manifest)
+        self._last_recording_summary = _recording_summary_from_manifest(manifest)
 
     def _close_stderr_locked(self) -> None:
         if self._state is not None and not self._state.stderr_file.closed:
@@ -678,36 +707,95 @@ def _drop_options(args: list[str], *options: str) -> list[str]:
     return dropped
 
 
-def _requested_controls(policy: CameraControlPolicy) -> dict[str, Any]:
+def _applied_controls_for_recording(profile: RecordingProfile, output_file: Path | None = None) -> dict[str, Any]:
+    applied = dict(profile.planned_applied_controls)
+    save_pts_path = _save_pts_path(profile, output_file)
+    if save_pts_path is not None and not _contains_option([BACKEND_NAME, *profile.rpicam_vid_args], "--save-pts"):
+        applied["save_pts"] = save_pts_path
+    if applied:
+        applied["backend"] = BACKEND_NAME
+    return applied
+
+
+def _warmup_applied_controls(profile: RecordingProfile) -> dict[str, Any]:
+    applied = dict(profile.planned_applied_controls)
+    applied.pop("duration", None)
+    applied.pop("timeout_ms", None)
+    if applied:
+        applied["backend"] = BACKEND_NAME
+    return applied
+
+
+def _save_pts_path(profile: RecordingProfile, output_file: Path | None) -> str | None:
+    save_pts = profile.recording.get("save_pts")
+    if save_pts is None or save_pts is False:
+        return None
+    if isinstance(save_pts, str):
+        return save_pts
+    if output_file is None:
+        return "enabled"
+    return str(output_file.with_suffix(".pts"))
+
+
+def _recording_summary_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
     return {
-        "exposure_mode": policy.exposure_mode,
-        "awb_mode": policy.awb_mode,
-        "focus_mode": policy.focus_mode,
+        "session_id": manifest.get("session_id"),
+        "take_id": manifest.get("take_id"),
+        "profile": manifest.get("profile"),
+        "resolved_controls": manifest.get("resolved_controls"),
+        "applied_controls": manifest.get("applied_controls"),
+        "unsupported_controls": manifest.get("unsupported_controls"),
+        "warnings": manifest.get("warnings", []),
     }
 
 
-def _applied_controls(policy: CameraControlPolicy) -> dict[str, Any]:
-    return {
-        "exposure_mode": "auto" if policy.exposure_mode in {"auto", "auto_then_lock"} else "unknown",
-        "awb_mode": "auto" if policy.awb_mode in {"auto", "auto_then_lock"} else "unknown",
-        "focus_mode": "auto" if policy.focus_mode == "auto" else "unknown",
-        "backend": BACKEND_NAME,
-        "notes": "rpicam-vid backend does not measure or lock AE/AWB/AF values in this MVP",
-    }
+def _control_status(
+    active_manifest: dict[str, Any] | None,
+    last_recording_summary: dict[str, Any] | None,
+    prepared_state: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if active_manifest is not None:
+        return {
+            "resolved_controls": active_manifest.get("resolved_controls"),
+            "applied_controls": active_manifest.get("applied_controls"),
+            "planned_applied_controls": None,
+            "unsupported_controls": active_manifest.get("unsupported_controls"),
+            "warnings": active_manifest.get("warnings", []),
+            "last_session_id": active_manifest.get("session_id"),
+            "last_take_id": active_manifest.get("take_id"),
+            "last_profile": active_manifest.get("profile"),
+        }
+    if last_recording_summary is not None:
+        return {
+            "resolved_controls": last_recording_summary.get("resolved_controls"),
+            "applied_controls": last_recording_summary.get("applied_controls"),
+            "planned_applied_controls": None,
+            "unsupported_controls": last_recording_summary.get("unsupported_controls"),
+            "warnings": last_recording_summary.get("warnings", []),
+            "last_session_id": last_recording_summary.get("session_id"),
+            "last_take_id": last_recording_summary.get("take_id"),
+            "last_profile": last_recording_summary.get("profile"),
+        }
+    if prepared_state is not None:
+        return {
+            "resolved_controls": prepared_state.get("resolved_controls"),
+            "applied_controls": prepared_state.get("applied_controls"),
+            "planned_applied_controls": prepared_state.get("planned_applied_controls"),
+            "unsupported_controls": prepared_state.get("unsupported_controls"),
+            "warnings": prepared_state.get("warnings", []),
+            "last_session_id": None,
+            "last_take_id": None,
+            "last_profile": None,
+        }
+    return {}
 
 
 def _backend_policy_warnings(policy: CameraControlPolicy, refocus: bool) -> list[str]:
     warnings: list[str] = []
     if policy.exposure_mode == "auto_then_lock" or policy.awb_mode == "auto_then_lock":
         warnings.append("AE/AWB lock not implemented for rpicam-vid backend yet; requested lock will run as auto")
-    if policy.exposure_mode == "manual":
-        warnings.append("manual exposure is not validated by the recorder; provide explicit rpicam_vid_args if needed")
-    if policy.awb_mode == "manual":
-        warnings.append("manual AWB is not validated by the recorder; provide explicit rpicam_vid_args if needed")
     if policy.focus_mode == "auto_then_lock" or refocus:
         warnings.append("AF lock/refocus not implemented for rpicam-vid backend yet")
-    if policy.focus_mode == "manual":
-        warnings.append("manual focus is not validated by the recorder; provide explicit rpicam_vid_args if needed")
     if policy.focus_mode == "continuous":
         warnings.append("continuous autofocus requested; avoid for final takes unless intentionally configured")
     return warnings

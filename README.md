@@ -7,7 +7,7 @@ The shape is deliberately simple:
 - Ansible provisions Raspberry Pi OS Lite hosts over SSH.
 - Each node runs a native Python FastAPI service under systemd.
 - The service starts and stops `rpicam-vid` as a subprocess.
-- Recordings are written under `/srv/openscan-camera/sessions/<session_id>/<camera_id>/`.
+- Recordings are written under `/srv/openscan-camera/sessions/<session_id>/<camera_id>/<take_id>/`.
 - `/srv/openscan-camera` is shared over Samba.
 - A small coordinator CLI sends concurrent HTTP requests to all configured nodes.
 
@@ -113,13 +113,40 @@ Each node exposes:
 - `GET /profiles`
 - `POST /recordings/start`
 - `POST /recordings/stop`
+- `POST /prepare`
+- `POST /prepare/reset`
 
 Start requests use this JSON body:
 
 ```json
 {
   "session_id": "test-001",
-  "profile": "video_1080p25"
+  "profile": "video_1080p25",
+  "take_id": "take_001",
+  "force_prepare": false,
+  "refocus": false,
+  "notes": "optional operator note"
+}
+```
+
+Only `session_id` and `profile` are required. If `take_id` is omitted, the node creates the next available `take_001`, `take_002`, and so on.
+
+Prepare requests use this JSON body:
+
+```json
+{
+  "session_id": "test-001",
+  "profile": "video_1080p25",
+  "force": false,
+  "refocus": false
+}
+```
+
+Prepare reset requests use this JSON body:
+
+```json
+{
+  "session_id": "test-001"
 }
 ```
 
@@ -128,13 +155,53 @@ The service loads:
 - `/etc/openscan-camera-node/config.yaml`
 - `/etc/openscan-camera-node/profiles.yaml`
 
-The manifest for each recording is written to:
+The prepared state for a session/camera is written to:
 
 ```text
-/srv/openscan-camera/sessions/<session_id>/<camera_id>/manifest.json
+/srv/openscan-camera/sessions/<session_id>/<camera_id>/prepared_state.json
+```
+
+The manifest for each take is written to:
+
+```text
+/srv/openscan-camera/sessions/<session_id>/<camera_id>/<take_id>/manifest.json
 ```
 
 `rpicam-vid` stderr is captured next to the recording as `rpicam-vid.stderr.log`.
+
+## Reliable Take Lifecycle
+
+The camera-node service tracks a simple lifecycle:
+
+- `idle`
+- `preparing`
+- `armed`
+- `recording`
+- `stopping`
+- `completed`
+- `error`
+
+Normal user flow:
+
+1. Run `multicam start --session <id> --profile <profile>`.
+2. The first start for a session automatically prepares each camera.
+3. The node starts recording immediately and marks the first configured seconds as pre-roll in the manifest.
+4. Later takes in the same session reuse prepared state when the session, profile, and relevant camera config still match.
+5. Use `--force-prepare` if lighting, framing, or the scene materially changed.
+6. Use `--refocus` if object distance changed.
+7. Use a new session for a materially different setup.
+
+During prepare, the MVP validates the selected profile, creates/checks output paths, records disk space, records the requested camera-control policy, and optionally runs a short `rpicam-vid` warmup when `prepare_warmup_seconds` is greater than zero. The normal coordinator path does not need to call prepare explicitly, but these debugging commands are available:
+
+```bash
+multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25
+multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25 --force
+multicam --nodes examples/nodes.yml prepare-reset --session test-001
+```
+
+Status output includes state, prepared session/profile validity, recording session/take/profile, output path, PID, last error, free disk space, and service version.
+
+Each take manifest includes the session, take, camera, hostname, service version, profile snapshot, prepared-state snapshot, requested camera policy, actually applied controls where known, start/stop times, pre-roll seconds, usable start offset/time, output file path, command, PID, exit code, warnings, and errors.
 
 ## Recording Profiles
 
@@ -145,6 +212,23 @@ The default profiles live in `examples/profiles.yml` and are installed onto each
 - `timelapse_1080p6`
 
 Profiles are intentionally thin wrappers around `rpicam-vid` arguments. The service appends `--output <file>` and `--timeout 0` unless the profile already provides those options.
+
+Profiles also support `camera_control_policy`:
+
+```yaml
+camera_control_policy:
+  pre_roll_seconds: 5
+  exposure_mode: auto
+  awb_mode: auto_then_lock
+  focus_mode: auto
+  reuse_prepared_controls: true
+  refocus_on_each_take: false
+  prepare_warmup_seconds: 0
+```
+
+For multicam consistency, AE/AWB should ideally warm up and then lock. With the current `rpicam-vid` subprocess backend, AE/AWB/AF lock values are not measured or applied by the service yet. The metadata is honest about this: for example, a requested `auto_then_lock` AWB policy is recorded as requested, but the actually applied backend behavior is recorded as `auto` with a warning.
+
+Avoid continuous autofocus for final takes unless it is explicitly needed. The `video_1080p50_experimental` profile is for testing only.
 
 ## What this MVP intentionally does not do yet
 
@@ -160,7 +244,6 @@ Profiles are intentionally thin wrappers around `rpicam-vid` arguments. The serv
 ## Next steps
 
 - Add `start_at` synchronization for closer multi-node start timing.
-- Add harvesting with `rsync`.
-- Add ffmpeg rendering and packaging workflows.
-- Add Remotion overlays for rendered outputs.
-- Add OpenScan3 integration points.
+- Add a Picamera2 backend that can actually measure and lock AE/AWB/AF values during prepare.
+- Add richer hardware health checks.
+- Add OpenScan3 integration points after the camera-node lifecycle is stable.

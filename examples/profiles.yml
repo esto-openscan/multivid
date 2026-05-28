@@ -2,6 +2,14 @@ profiles:
   video_1080p25:
     description: 1080p H.264 video at 25 fps
     output_extension: h264
+    camera_control_policy:
+      pre_roll_seconds: 5
+      exposure_mode: auto
+      awb_mode: auto_then_lock
+      focus_mode: auto
+      reuse_prepared_controls: true
+      refocus_on_each_take: false
+      prepare_warmup_seconds: 0
     rpicam_vid_args:
       - --width
       - "1920"
@@ -19,6 +27,14 @@ profiles:
   video_1080p50_experimental:
     description: 1080p H.264 video at 50 fps; useful for testing only
     output_extension: h264
+    camera_control_policy:
+      pre_roll_seconds: 5
+      exposure_mode: auto
+      awb_mode: auto_then_lock
+      focus_mode: auto
+      reuse_prepared_controls: true
+      refocus_on_each_take: false
+      prepare_warmup_seconds: 0
     rpicam_vid_args:
       - --width
       - "1920"
@@ -36,6 +52,14 @@ profiles:
   timelapse_1080p6:
     description: Simple low-framerate 1080p H.264 capture at 6 fps
     output_extension: h264
+    camera_control_policy:
+      pre_roll_seconds: 5
+      exposure_mode: auto
+      awb_mode: auto_then_lock
+      focus_mode: auto
+      reuse_prepared_controls: true
+      refocus_on_each_take: false
+      prepare_warmup_seconds: 0
     rpicam_vid_args:
       - --width
       - "1920"

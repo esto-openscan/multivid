@@ -175,6 +175,14 @@
     group: "{{ openscan_service_group }}"
     mode: "0750"
 
+- name: Ensure camera node sessions root exists
+  ansible.builtin.file:
+    path: "{{ openscan_sessions_root }}"
+    state: directory
+    owner: "{{ openscan_service_user }}"
+    group: "{{ openscan_service_group }}"
+    mode: "0775"
+
 - name: Install camera node config
   ansible.builtin.template:
     src: config.yaml.j2

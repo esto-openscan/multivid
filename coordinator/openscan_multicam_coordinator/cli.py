@@ -60,6 +60,37 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("calibration-last", help="Show the last calibration result for all nodes")
     subparsers.add_parser("calibration-suggestions", help="Show copyable per-node calibration suggestions")
 
+    positioning_start_parser = subparsers.add_parser("positioning-start", help="Start low-res positioning preview")
+    positioning_start_parser.add_argument("--width", type=int, help="Preview width")
+    positioning_start_parser.add_argument("--height", type=int, help="Preview height")
+    positioning_start_parser.add_argument("--fps", type=int, help="Preview frame rate")
+    positioning_start_parser.add_argument("--jpeg-quality", type=int, help="Preview JPEG quality, 1-100")
+    positioning_start_parser.add_argument(
+        "--overlay",
+        action="append",
+        help="Overlay to draw: crosshair, grid, shorts-safe-area, camera-label. May be repeated.",
+    )
+    positioning_start_parser.add_argument("--profile", help="Optional recording profile whose camera controls are reused")
+    subparsers.add_parser("positioning-stop", help="Stop positioning preview")
+    subparsers.add_parser("positioning-status", help="Show positioning preview status")
+    subparsers.add_parser("positioning-urls", help="Print browser-openable positioning preview URLs")
+
+    stills_capture_parser = subparsers.add_parser("stills-capture", help="Capture high-resolution reference stills")
+    stills_capture_parser.add_argument("--session", required=True, help="Session id for reference still storage")
+    stills_capture_parser.add_argument("--label", help="Reference still label")
+    stills_capture_parser.add_argument("--profile", help="Optional recording profile whose camera controls are reused")
+    stills_capture_parser.add_argument("--width", type=int, help="Still width")
+    stills_capture_parser.add_argument("--height", type=int, help="Still height")
+    stills_capture_parser.add_argument("--quality", type=int, help="Still JPEG quality, 1-100")
+    stills_capture_parser.add_argument("--notes", help="Optional operator note")
+    stills_capture_parser.add_argument(
+        "--no-recording-profile-controls",
+        action="store_true",
+        help="Do not reuse camera controls from --profile",
+    )
+    stills_capture_parser.add_argument("--force", action="store_true", help="Overwrite an existing label on each node")
+    subparsers.add_parser("stills-status", help="Show reference still capture status")
+
     harvest_parser = subparsers.add_parser("harvest", help="Collect a recorded session from camera nodes")
     harvest_parser.add_argument("--session", required=True, help="Session id to harvest")
     harvest_parser.add_argument(
@@ -145,6 +176,8 @@ async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> lis
     timeout_seconds = args.timeout
     if args.command == "calibrate":
         timeout_seconds = max(args.timeout, float(args.duration) + 20.0)
+    if args.command == "stills-capture":
+        timeout_seconds = max(args.timeout, 30.0)
     timeout = httpx.Timeout(timeout_seconds)
     async with httpx.AsyncClient(timeout=timeout) as client:
         if args.command == "status":
@@ -190,6 +223,44 @@ async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> lis
             tasks = [request_node(client, node, "GET", "/calibration/status") for node in nodes]
         elif args.command in {"calibration-last", "calibration-suggestions"}:
             tasks = [request_node(client, node, "GET", "/calibration/last") for node in nodes]
+        elif args.command == "positioning-start":
+            body = {}
+            for key in ("width", "height", "fps"):
+                value = getattr(args, key)
+                if value is not None:
+                    body[key] = value
+            if args.jpeg_quality is not None:
+                body["jpeg_quality"] = args.jpeg_quality
+            if args.overlay:
+                body["overlays"] = args.overlay
+            if args.profile:
+                body["profile"] = args.profile
+            tasks = [request_node(client, node, "POST", "/positioning/start", body) for node in nodes]
+        elif args.command == "positioning-stop":
+            tasks = [request_node(client, node, "POST", "/positioning/stop") for node in nodes]
+        elif args.command in {"positioning-status", "positioning-urls"}:
+            tasks = [request_node(client, node, "GET", "/positioning/status") for node in nodes]
+        elif args.command == "stills-capture":
+            body = {"session_id": args.session}
+            if args.label:
+                body["label"] = args.label
+            if args.profile:
+                body["profile"] = args.profile
+            if args.width is not None:
+                body["width"] = args.width
+            if args.height is not None:
+                body["height"] = args.height
+            if args.quality is not None:
+                body["quality"] = args.quality
+            if args.notes:
+                body["notes"] = args.notes
+            if args.no_recording_profile_controls:
+                body["use_recording_profile_controls"] = False
+            if args.force:
+                body["force"] = True
+            tasks = [request_node(client, node, "POST", "/stills/capture", body) for node in nodes]
+        elif args.command == "stills-status":
+            tasks = [request_node(client, node, "GET", "/stills/status") for node in nodes]
         elif args.command == "stop":
             tasks = [request_node(client, node, "POST", "/recordings/stop") for node in nodes]
         else:
@@ -198,6 +269,16 @@ async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> lis
 
 
 def _print_results(command: str, results: list[NodeResult]) -> None:
+    if command.startswith("positioning-"):
+        _print_positioning_results(command, results)
+        _print_failure_summary(results)
+        return
+
+    if command.startswith("stills-"):
+        _print_stills_results(command, results)
+        _print_failure_summary(results)
+        return
+
     if command in {"calibrate", "calibration-status", "calibration-last", "calibration-suggestions"}:
         _print_calibration_results(command, results)
         _print_failure_summary(results)
@@ -287,6 +368,17 @@ def _print_harvest_summary(report: dict[str, Any], dry_run: bool = False) -> Non
         print(f"Report: {report.get('session_dir')}/harvest_report.json")
 
 
+def _print_table(rows: list[dict[str, str]], columns: list[str]) -> None:
+    if not rows:
+        print("No nodes")
+        return
+    widths = {column: max(len(column), *(len(str(row.get(column, ""))) for row in rows)) for column in columns}
+    print("  ".join(column.upper().ljust(widths[column]) for column in columns))
+    print("  ".join("-" * widths[column] for column in columns))
+    for row in rows:
+        print("  ".join(str(row.get(column, "")).ljust(widths[column]) for column in columns))
+
+
 def _print_calibration_results(command: str, results: list[NodeResult]) -> None:
     for result in results:
         prefix = f"{result.node.name} ({result.node.camera_id})"
@@ -305,6 +397,126 @@ def _print_calibration_results(command: str, results: list[NodeResult]) -> None:
 
         summary = data.get("calibration") if isinstance(data.get("calibration"), dict) else data
         print(_format_calibration_summary(prefix, summary, show_yaml=command == "calibration-suggestions"))
+
+
+def _print_positioning_results(command: str, results: list[NodeResult]) -> None:
+    if command == "positioning-urls":
+        rows = _positioning_url_rows(results)
+        columns = ["node", "camera", "result", "running", "snapshot_url", "stream_url", "error"]
+    else:
+        rows = [_positioning_row(result) for result in results]
+        columns = ["node", "camera", "result", "state", "running", "settings", "snapshot", "stream", "warnings", "error"]
+    _print_table(rows, columns)
+
+
+def _print_stills_results(command: str, results: list[NodeResult]) -> None:
+    rows = [_stills_row(result, command) for result in results]
+    columns = ["node", "camera", "result", "running", "label", "status", "image", "warnings", "error"]
+    _print_table(rows, columns)
+
+
+def _positioning_row(result: NodeResult) -> dict[str, str]:
+    data = result.data or {}
+    if not result.ok:
+        status = f"HTTP {result.status_code}" if result.status_code is not None else "offline"
+        return {
+            "node": result.node.name,
+            "camera": result.node.camera_id,
+            "result": f"FAILED {status}",
+            "state": _value(data.get("state")),
+            "running": _value(data.get("running")),
+            "settings": _format_positioning_settings(data.get("settings")),
+            "snapshot": _value(data.get("snapshot_path")),
+            "stream": _value(data.get("stream_path")),
+            "warnings": _format_warnings(data.get("warnings")),
+            "error": result.error or "",
+        }
+    return {
+        "node": result.node.name,
+        "camera": result.node.camera_id,
+        "result": "OK",
+        "state": _value(data.get("state")),
+        "running": _value(data.get("running")),
+        "settings": _format_positioning_settings(data.get("settings")),
+        "snapshot": _value(data.get("snapshot_path")),
+        "stream": _value(data.get("stream_path")),
+        "warnings": _format_warnings(data.get("warnings")),
+        "error": _value(data.get("last_error"), empty=""),
+    }
+
+
+def _positioning_url_rows(results: list[NodeResult]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for result in results:
+        data = result.data or {}
+        status = f"HTTP {result.status_code}" if result.status_code is not None else "offline"
+        rows.append(
+            {
+                "node": result.node.name,
+                "camera": result.node.camera_id,
+                "result": "OK" if result.ok else f"FAILED {status}",
+                "running": _value(data.get("running")),
+                "snapshot_url": f"{result.node.base_url}/positioning/snapshot.jpg",
+                "stream_url": f"{result.node.base_url}/positioning/stream.mjpg",
+                "error": "" if result.ok else result.error or "",
+            }
+        )
+    return rows
+
+
+def _stills_row(result: NodeResult, command: str) -> dict[str, str]:
+    data = result.data or {}
+    if not result.ok:
+        status = f"HTTP {result.status_code}" if result.status_code is not None else "offline"
+        return {
+            "node": result.node.name,
+            "camera": result.node.camera_id,
+            "result": f"FAILED {status}",
+            "running": _value(data.get("running")),
+            "label": "-",
+            "status": "-",
+            "image": "-",
+            "warnings": "",
+            "error": result.error or "",
+        }
+
+    summary = data.get("still_capture") if isinstance(data.get("still_capture"), dict) else None
+    if summary is None and isinstance(data.get("reference_still"), dict):
+        summary = data["reference_still"]
+    if summary is None and isinstance(data.get("last"), dict):
+        summary = data["last"]
+    summary = summary or {}
+    return {
+        "node": result.node.name,
+        "camera": result.node.camera_id,
+        "result": "OK",
+        "running": _value(data.get("running"), empty="false") if command == "stills-status" else _value(data.get("still_capture_running"), empty="false"),
+        "label": _value(summary.get("label")),
+        "status": _value(summary.get("status")),
+        "image": _value(summary.get("image_file_path")),
+        "warnings": _format_warnings(summary.get("warnings")),
+        "error": _format_warnings(summary.get("errors")),
+    }
+
+
+def _format_positioning_settings(settings: Any) -> str:
+    if not isinstance(settings, dict):
+        return "-"
+    width = settings.get("width")
+    height = settings.get("height")
+    fps = settings.get("fps")
+    quality = settings.get("jpeg_quality")
+    overlays = settings.get("overlays") if isinstance(settings.get("overlays"), list) else []
+    parts = []
+    if width and height:
+        parts.append(f"{width}x{height}")
+    if fps:
+        parts.append(f"{fps}fps")
+    if quality:
+        parts.append(f"q={quality}")
+    if overlays:
+        parts.append("overlays=" + ",".join(str(item) for item in overlays))
+    return " ".join(parts) if parts else "-"
 
 
 def _format_calibration_summary(prefix: str, summary: dict[str, Any], show_yaml: bool = False) -> str:

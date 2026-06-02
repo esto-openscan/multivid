@@ -16,20 +16,29 @@ from typing import Any, BinaryIO
 
 from . import __version__
 from .calibration import build_suggested_controls, parse_rpicam_metadata, suggestion_values
-from .config import CameraNodeConfig
+from .config import CameraNodeConfig, normalize_positioning_overlays
+from .imaging import (
+    JpegCaptureError,
+    POSITIONING_BACKEND_NAME,
+    RpicamJpegBackend,
+    camera_controls_from_profile,
+)
 from .profiles import CameraControlPolicy, RecordingProfile, RecordingProfiles
 
 
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 TAKE_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 CALIBRATION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+STILL_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 AUTO_TAKE_ID_PATTERN = re.compile(r"^take_(\d{3})$")
+AUTO_REFERENCE_LABEL_PATTERN = re.compile(r"^reference_(\d{3})$")
 PROCESS_STOP_TIMEOUT_SECONDS = 10
 LOW_DISK_WARNING_BYTES = 500 * 1024 * 1024
 BACKEND_NAME = "rpicam-vid"
 MANIFEST_SCHEMA_VERSION = 4
 PREPARED_STATE_SCHEMA_VERSION = 3
 CALIBRATION_MANIFEST_SCHEMA_VERSION = 1
+STILL_MANIFEST_SCHEMA_VERSION = 1
 
 
 class RecorderError(Exception):
@@ -37,6 +46,14 @@ class RecorderError(Exception):
 
 
 class AlreadyRecordingError(RecorderError):
+    pass
+
+
+class AlreadyPositioningError(RecorderError):
+    pass
+
+
+class CameraBusyError(RecorderError):
     pass
 
 
@@ -60,6 +77,10 @@ class TakeAlreadyExistsError(RecorderError):
     pass
 
 
+class InvalidStillLabelError(RecorderError):
+    pass
+
+
 @dataclass
 class RecordingState:
     session_id: str
@@ -75,17 +96,37 @@ class RecordingState:
     manifest: dict[str, Any]
 
 
+@dataclass
+class PositioningState:
+    settings: dict[str, Any]
+    started_at: str
+    updated_at: str | None
+    profile_name: str | None
+    frames_served: int
+    last_frame_at: str | None
+    last_backend: str | None
+    last_command: list[str] | None
+    last_error: str | None
+    warnings: list[str]
+
+
 class RpicamVidRecorder:
     def __init__(self, config: CameraNodeConfig, profiles: RecordingProfiles) -> None:
         self._config = config
         self._profiles = profiles
         self._lock = threading.Lock()
+        self._camera_lock = threading.Lock()
+        self._jpeg_backend = RpicamJpegBackend()
         self._state: RecordingState | None = None
+        self._positioning_state: PositioningState | None = None
         self._lifecycle_state = "idle"
         self._last_error: str | None = None
+        self._last_positioning_error: str | None = None
         self._last_recording_summary: dict[str, Any] | None = None
         self._last_calibration_summary: dict[str, Any] | None = None
+        self._last_still_capture_info: dict[str, Any] | None = None
         self._calibration_running = False
+        self._still_capture_running = False
         self._prepared_state: dict[str, Any] | None = None
         self._hostname = socket.gethostname()
 
@@ -105,6 +146,12 @@ class RpicamVidRecorder:
 
                 if self._state is not None and self._state.process.poll() is None:
                     raise AlreadyRecordingError("recording is already running")
+                if self._positioning_state is not None:
+                    raise AlreadyPositioningError(
+                        "cannot start recording while positioning preview is running; stop positioning first"
+                    )
+                if self._still_capture_running:
+                    raise CameraBusyError("cannot start recording while a reference still capture is running")
 
                 self._validate_session_id(session_id)
                 profile = self._get_profile(profile_name)
@@ -266,7 +313,7 @@ class RpicamVidRecorder:
                 self._last_error = None
                 return self._status_locked()
             except RecorderError as exc:
-                self._lifecycle_state = "error"
+                self._lifecycle_state = "positioning" if isinstance(exc, AlreadyPositioningError) else "error"
                 self._last_error = str(exc)
                 raise
             except FileNotFoundError as exc:
@@ -318,6 +365,12 @@ class RpicamVidRecorder:
                 self._finalize_if_process_exited_locked()
                 if self._state is not None and self._state.process.poll() is None:
                     raise AlreadyRecordingError("cannot prepare while a recording is already running")
+                if self._positioning_state is not None:
+                    raise AlreadyPositioningError(
+                        "cannot prepare while positioning preview is running; stop positioning first"
+                    )
+                if self._still_capture_running:
+                    raise CameraBusyError("cannot prepare while a reference still capture is running")
 
                 self._validate_session_id(session_id)
                 profile = self._get_profile(profile_name)
@@ -334,7 +387,7 @@ class RpicamVidRecorder:
                 status["prepared_state"] = prepared_state
                 return status
             except RecorderError as exc:
-                self._lifecycle_state = "error"
+                self._lifecycle_state = "positioning" if isinstance(exc, AlreadyPositioningError) else "error"
                 self._last_error = str(exc)
                 raise
 
@@ -374,8 +427,14 @@ class RpicamVidRecorder:
                 self._finalize_if_process_exited_locked()
                 if self._state is not None and self._state.process.poll() is None:
                     raise AlreadyRecordingError("cannot run calibration while a recording is running")
+                if self._positioning_state is not None:
+                    raise AlreadyPositioningError(
+                        "cannot run calibration while positioning preview is running; stop positioning first"
+                    )
+                if self._still_capture_running:
+                    raise CameraBusyError("cannot run calibration while a reference still capture is running")
                 if self._calibration_running:
-                    raise RecorderError("calibration is already running")
+                    raise CameraBusyError("calibration is already running")
 
                 self._validate_session_id(session_id)
                 profile = self._get_profile(profile_name)
@@ -390,7 +449,7 @@ class RpicamVidRecorder:
                 self._calibration_running = True
                 self._lifecycle_state = "calibrating"
             except RecorderError as exc:
-                self._lifecycle_state = "error"
+                self._lifecycle_state = "positioning" if isinstance(exc, AlreadyPositioningError) else "error"
                 self._last_error = str(exc)
                 raise
 
@@ -464,6 +523,279 @@ class RpicamVidRecorder:
                 "warnings": active.get("warnings", []),
             }
 
+    def start_positioning(
+        self,
+        width: int | None = None,
+        height: int | None = None,
+        fps: int | None = None,
+        jpeg_quality: int | None = None,
+        overlays: list[str] | None = None,
+        profile_name: str | None = None,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._finalize_if_process_exited_locked()
+            if self._state is not None and self._state.process.poll() is None:
+                raise AlreadyRecordingError("cannot start positioning preview while a recording is running")
+            if self._calibration_running:
+                raise CameraBusyError("cannot start positioning preview while calibration is running")
+            if self._still_capture_running:
+                raise CameraBusyError("cannot start positioning preview while a reference still capture is running")
+            if profile_name is not None:
+                self._get_profile(profile_name)
+
+            settings = self._resolve_positioning_settings(
+                width=width,
+                height=height,
+                fps=fps,
+                jpeg_quality=jpeg_quality,
+                overlays=overlays,
+                profile_name=profile_name,
+            )
+            now = _utc_now()
+            previous = self._positioning_state
+            self._positioning_state = PositioningState(
+                settings=settings,
+                started_at=previous.started_at if previous else now,
+                updated_at=now if previous else None,
+                profile_name=profile_name,
+                frames_served=previous.frames_served if previous else 0,
+                last_frame_at=previous.last_frame_at if previous else None,
+                last_backend=previous.last_backend if previous else None,
+                last_command=previous.last_command if previous else None,
+                last_error=None,
+                warnings=[],
+            )
+            self._lifecycle_state = "positioning"
+            self._last_error = None
+            self._last_positioning_error = None
+            return self._positioning_status_locked()
+
+    def stop_positioning(self) -> dict[str, Any]:
+        wait_for_active_capture = False
+        with self._lock:
+            if self._positioning_state is not None:
+                wait_for_active_capture = True
+                self._positioning_state = None
+                if self._state is not None and self._state.process.poll() is None:
+                    self._lifecycle_state = "recording"
+                elif self._calibration_running:
+                    self._lifecycle_state = "calibrating"
+                else:
+                    self._lifecycle_state = "armed" if self._prepared_state else "idle"
+                self._last_positioning_error = None
+                self._last_error = None
+
+        if wait_for_active_capture:
+            with self._camera_lock:
+                pass
+
+        with self._lock:
+            return self._positioning_status_locked()
+
+    def positioning_status(self) -> dict[str, Any]:
+        with self._lock:
+            return self._positioning_status_locked()
+
+    def positioning_running(self) -> bool:
+        with self._lock:
+            return self._positioning_state is not None
+
+    def positioning_frame_interval_seconds(self) -> float:
+        with self._lock:
+            fps = self._positioning_state.settings.get("fps") if self._positioning_state else self._config.positioning.fps
+            return 1.0 / max(1.0, float(fps))
+
+    def positioning_snapshot(self) -> tuple[bytes, dict[str, Any]]:
+        with self._lock:
+            if self._positioning_state is None:
+                raise RecorderError("positioning preview is not running; call POST /positioning/start first")
+            settings = dict(self._positioning_state.settings)
+            profile = self._get_profile(self._positioning_state.profile_name) if self._positioning_state.profile_name else None
+
+        camera_controls = camera_controls_from_profile(profile)
+        timeout_ms = max(100, min(1500, int(1000 / max(1, int(settings["fps"])))))
+        try:
+            with self._camera_lock:
+                result = self._jpeg_backend.capture_to_bytes(
+                    width=int(settings["width"]),
+                    height=int(settings["height"]),
+                    quality=int(settings["jpeg_quality"]),
+                    camera_controls=camera_controls,
+                    overlay_settings={
+                        "camera_id": self._config.camera_id,
+                        "overlays": list(settings.get("overlays", [])),
+                    },
+                    timeout_ms=timeout_ms,
+                )
+        except (FileNotFoundError, JpegCaptureError) as exc:
+            self._record_positioning_error(str(exc))
+            raise RecorderError(str(exc)) from exc
+
+        metadata = {
+            "backend": result.backend,
+            "command": result.command,
+            "warnings": result.warnings,
+            "captured_at": _utc_now(),
+        }
+        with self._lock:
+            if self._positioning_state is not None:
+                self._positioning_state.frames_served += 1
+                self._positioning_state.last_frame_at = metadata["captured_at"]
+                self._positioning_state.last_backend = result.backend
+                self._positioning_state.last_command = result.command
+                self._positioning_state.last_error = None
+                self._positioning_state.warnings = _dedupe(result.warnings)
+                self._last_positioning_error = None
+        return result.image_bytes or b"", metadata
+
+    def capture_reference_still(
+        self,
+        session_id: str,
+        label: str | None = None,
+        profile_name: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        quality: int | None = None,
+        notes: str | None = None,
+        use_recording_profile_controls: bool | None = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        with self._lock:
+            self._finalize_if_process_exited_locked()
+            if self._state is not None and self._state.process.poll() is None:
+                raise AlreadyRecordingError("cannot capture a reference still while recording")
+            if self._calibration_running:
+                raise CameraBusyError("cannot capture a reference still while calibration is running")
+            if self._positioning_state is not None:
+                raise AlreadyPositioningError(
+                    "cannot capture a reference still while positioning preview is running; stop positioning first"
+                )
+            if self._still_capture_running:
+                raise CameraBusyError("reference still capture is already running")
+
+            self._validate_session_id(session_id)
+            if label is not None:
+                self._validate_still_label(label)
+            profile = self._get_profile(profile_name) if profile_name else None
+            resolved_quality = self._resolve_quality(quality, self._config.reference_stills.quality, "quality")
+            resolved_width = self._resolve_optional_dimension(width, self._config.reference_stills.width, "width")
+            resolved_height = self._resolve_optional_dimension(height, self._config.reference_stills.height, "height")
+            controls_requested = (
+                self._config.reference_stills.use_recording_profile_controls
+                if use_recording_profile_controls is None
+                else bool(use_recording_profile_controls)
+            )
+
+            state_before_capture = self._lifecycle_state
+            stills_dir = self._reference_stills_dir(session_id)
+            stills_dir.mkdir(parents=True, exist_ok=True)
+            resolved_label, label_warnings = self._resolve_reference_still_label(stills_dir, label, force)
+            image_file = stills_dir / f"{resolved_label}.jpg"
+            manifest_path = stills_dir / f"{resolved_label}_manifest.json"
+            warnings = list(label_warnings)
+            camera_controls = camera_controls_from_profile(profile) if controls_requested else {}
+            if controls_requested and profile is None:
+                warnings.append("use_recording_profile_controls is true but no profile was provided; no profile controls were applied")
+            if controls_requested and profile is not None and not camera_controls:
+                warnings.append(f"profile {profile.name!r} has no still-applicable camera controls")
+
+            manifest: dict[str, Any] = {
+                "schema_version": STILL_MANIFEST_SCHEMA_VERSION,
+                "status": "running",
+                "session_id": session_id,
+                "camera_id": self._config.camera_id,
+                "label": resolved_label,
+                "requested_label": label,
+                "timestamp": _utc_now(),
+                "finished_at": None,
+                "hostname": self._hostname,
+                "node_hostname": self._hostname,
+                "service_version": __version__,
+                "image_file_path": str(image_file),
+                "image_file_name": image_file.name,
+                "manifest_path": str(manifest_path),
+                "requested_size": {"width": resolved_width, "height": resolved_height},
+                "requested_quality": resolved_quality,
+                "actual_file_size": None,
+                "backend": None,
+                "backend_command": None,
+                "profile": profile.name if profile else None,
+                "profile_snapshot": profile.as_dict() if profile else None,
+                "use_recording_profile_controls": controls_requested,
+                "requested_controls": profile.requested_controls() if profile and controls_requested else None,
+                "applied_controls": camera_controls,
+                "notes": notes,
+                "force": force,
+                "warnings": _dedupe(warnings),
+                "errors": [],
+                "state_before_capture": state_before_capture,
+                "positioning_was_active": False,
+                "positioning_stopped": False,
+                "positioning_behavior": "rejected_if_active",
+            }
+            self._write_json(manifest_path, manifest)
+            self._still_capture_running = True
+
+        try:
+            with self._camera_lock:
+                capture = self._jpeg_backend.capture_to_file(
+                    output_file=image_file,
+                    width=resolved_width,
+                    height=resolved_height,
+                    quality=resolved_quality,
+                    camera_controls=camera_controls,
+                    timeout_ms=1200,
+                )
+            manifest.update(
+                {
+                    "status": "completed",
+                    "finished_at": _utc_now(),
+                    "actual_file_size": image_file.stat().st_size if image_file.exists() else None,
+                    "backend": capture.backend,
+                    "backend_command": capture.command,
+                    "warnings": _dedupe([*manifest.get("warnings", []), *capture.warnings]),
+                }
+            )
+        except (FileNotFoundError, JpegCaptureError) as exc:
+            manifest.update(
+                {
+                    "status": "failed",
+                    "finished_at": _utc_now(),
+                    "errors": [str(exc)],
+                }
+            )
+            self._write_json(manifest_path, manifest)
+            with self._lock:
+                self._still_capture_running = False
+                self._last_still_capture_info = _still_capture_summary(manifest)
+                self._lifecycle_state = "error"
+                self._last_error = str(exc)
+            raise RecorderError(str(exc)) from exc
+        finally:
+            with self._lock:
+                self._still_capture_running = False
+
+        self._write_json(manifest_path, manifest)
+        summary = _still_capture_summary(manifest)
+        with self._lock:
+            self._last_still_capture_info = summary
+            self._last_error = None
+            if self._lifecycle_state == "error":
+                self._lifecycle_state = "armed" if self._prepared_state else "idle"
+            status = self._status_locked()
+            status["still_capture"] = summary
+            status["reference_still"] = summary
+            return status
+
+    def stills_status(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "camera_id": self._config.camera_id,
+                "hostname": self._hostname,
+                "running": self._still_capture_running,
+                "last": self._last_still_capture_info,
+            }
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             self._finalize_if_process_exited_locked()
@@ -504,6 +836,7 @@ class RpicamVidRecorder:
             exists = camera_dir.exists()
             prepared_path = self._prepared_state_path(session_id)
             takes = self._session_takes_summary(camera_dir) if exists else []
+            reference_stills = self._reference_stills_summary(camera_dir) if exists else []
             return {
                 "camera_id": self._config.camera_id,
                 "hostname": self._hostname,
@@ -514,6 +847,8 @@ class RpicamVidRecorder:
                 "prepared_state": _file_summary(prepared_path, camera_dir) if exists else {"exists": False},
                 "takes": takes,
                 "take_count": len(takes),
+                "reference_stills": reference_stills,
+                "reference_still_count": len(reference_stills),
             }
 
     def session_takes(self, session_id: str) -> dict[str, Any]:
@@ -545,7 +880,7 @@ class RpicamVidRecorder:
     def _session_takes_summary(self, camera_dir: Path) -> list[dict[str, Any]]:
         takes: list[dict[str, Any]] = []
         for child in sorted(camera_dir.iterdir()):
-            if not child.is_dir() or child.name == "calibration":
+            if not child.is_dir() or child.name in {"calibration", "reference_stills"}:
                 continue
             manifest_path = child / "manifest.json"
             manifest = _read_json_mapping(manifest_path)
@@ -564,6 +899,74 @@ class RpicamVidRecorder:
                 }
             )
         return takes
+
+    def _reference_stills_summary(self, camera_dir: Path) -> list[dict[str, Any]]:
+        stills_dir = camera_dir / "reference_stills"
+        if not stills_dir.exists() or not stills_dir.is_dir():
+            return []
+
+        stills: list[dict[str, Any]] = []
+        seen_labels: set[str] = set()
+        manifests = sorted(stills_dir.glob("*_manifest.json"))
+        for manifest_path in manifests:
+            manifest = _read_json_mapping(manifest_path)
+            label = _reference_label_from_manifest_path(manifest_path)
+            if manifest is not None and isinstance(manifest.get("label"), str):
+                label = manifest["label"]
+            seen_labels.add(label)
+            image_name = manifest.get("image_file_name") if isinstance(manifest, dict) else None
+            image_path = stills_dir / str(image_name or f"{label}.jpg")
+            files = _reference_still_file_summaries(
+                image_path=image_path,
+                manifest_path=manifest_path,
+                camera_dir=camera_dir,
+            )
+            warnings = manifest.get("warnings", []) if isinstance(manifest, dict) and isinstance(manifest.get("warnings"), list) else []
+            errors = manifest.get("errors", []) if isinstance(manifest, dict) and isinstance(manifest.get("errors"), list) else []
+            stills.append(
+                {
+                    "label": label,
+                    "path": str(stills_dir),
+                    "relative_dir": str(stills_dir.relative_to(camera_dir)),
+                    "image_file_name": image_path.name,
+                    "manifest_file_name": manifest_path.name,
+                    "image": _file_summary(image_path, camera_dir),
+                    "manifest": _file_summary(manifest_path, camera_dir),
+                    "manifest_summary": _still_manifest_harvest_summary(manifest),
+                    "timestamp": manifest.get("timestamp") if isinstance(manifest, dict) else None,
+                    "warnings": warnings,
+                    "errors": errors,
+                    "files": files,
+                }
+            )
+
+        for image_path in sorted(stills_dir.glob("*.jpg")):
+            label = image_path.stem
+            if label in seen_labels:
+                continue
+            manifest_path = stills_dir / f"{label}_manifest.json"
+            files = _reference_still_file_summaries(
+                image_path=image_path,
+                manifest_path=manifest_path,
+                camera_dir=camera_dir,
+            )
+            stills.append(
+                {
+                    "label": label,
+                    "path": str(stills_dir),
+                    "relative_dir": str(stills_dir.relative_to(camera_dir)),
+                    "image_file_name": image_path.name,
+                    "manifest_file_name": manifest_path.name,
+                    "image": _file_summary(image_path, camera_dir),
+                    "manifest": _file_summary(manifest_path, camera_dir),
+                    "manifest_summary": None,
+                    "timestamp": None,
+                    "warnings": ["reference still image has no manifest"],
+                    "errors": [],
+                    "files": files,
+                }
+            )
+        return stills
 
     def _run_calibration_unlocked(
         self,
@@ -1007,11 +1410,22 @@ class RpicamVidRecorder:
 
     def _status_locked(self) -> dict[str, Any]:
         recording_running = self._state is not None and self._state.process.poll() is None
+        positioning_running = self._positioning_state is not None
         prepared_state = self._prepared_state
         if prepared_state is None and self._state is not None:
             prepared_state = self._state.manifest.get("prepared_state")
         active_manifest = self._state.manifest if self._state is not None else None
         control_status = _control_status(active_manifest, self._last_recording_summary, prepared_state)
+        recording_allowed = not (
+            recording_running or positioning_running or self._calibration_running or self._still_capture_running
+        )
+        positioning_allowed = not (recording_running or self._calibration_running or self._still_capture_running)
+        calibration_allowed = not (
+            recording_running or positioning_running or self._calibration_running or self._still_capture_running
+        )
+        still_capture_allowed = not (
+            recording_running or positioning_running or self._calibration_running or self._still_capture_running
+        )
 
         return {
             "camera_id": self._config.camera_id,
@@ -1021,6 +1435,24 @@ class RpicamVidRecorder:
             "state": self._lifecycle_state,
             "recording_running": recording_running,
             "recording": recording_running,
+            "positioning_running": positioning_running,
+            "positioning": self._positioning_status_locked(),
+            "positioning_settings": dict(self._positioning_state.settings) if self._positioning_state else None,
+            "positioning_snapshot_path": "/positioning/snapshot.jpg" if positioning_running else None,
+            "positioning_stream_path": "/positioning/stream.mjpg" if positioning_running else None,
+            "last_positioning_error": self._last_positioning_error,
+            "still_capture_running": self._still_capture_running,
+            "last_still_capture": self._last_still_capture_info,
+            "allowed": {
+                "recording": recording_allowed,
+                "positioning": positioning_allowed,
+                "calibration": calibration_allowed,
+                "still_capture": still_capture_allowed,
+            },
+            "recording_allowed": recording_allowed,
+            "positioning_allowed": positioning_allowed,
+            "calibration_allowed": calibration_allowed,
+            "still_capture_allowed": still_capture_allowed,
             "current_session_id": self._state.session_id if self._state else None,
             "current_take_id": self._state.take_id if self._state else None,
             "current_profile": self._state.profile_name if self._state else None,
@@ -1177,6 +1609,158 @@ class RpicamVidRecorder:
 
     def _active_calibration_path(self, session_id: str) -> Path:
         return self._calibration_root(session_id) / "active_suggestions.json"
+
+    def _reference_stills_dir(self, session_id: str) -> Path:
+        return self._camera_session_dir(session_id) / "reference_stills"
+
+    def _resolve_positioning_settings(
+        self,
+        width: int | None,
+        height: int | None,
+        fps: int | None,
+        jpeg_quality: int | None,
+        overlays: list[str] | None,
+        profile_name: str | None,
+    ) -> dict[str, Any]:
+        defaults = self._config.positioning
+        return {
+            "width": self._resolve_dimension(width, defaults.width, "width"),
+            "height": self._resolve_dimension(height, defaults.height, "height"),
+            "fps": self._resolve_dimension(fps, defaults.fps, "fps"),
+            "jpeg_quality": self._resolve_quality(jpeg_quality, defaults.jpeg_quality, "jpeg_quality"),
+            "overlays": normalize_positioning_overlays(defaults.overlays if overlays is None else overlays),
+            "snapshot_path": "/positioning/snapshot.jpg",
+            "stream_path": "/positioning/stream.mjpg",
+            "profile": profile_name,
+            "backend": POSITIONING_BACKEND_NAME,
+        }
+
+    @staticmethod
+    def _resolve_dimension(value: int | None, default: int, name: str) -> int:
+        resolved = default if value is None else value
+        if isinstance(resolved, bool):
+            raise RecorderError(f"{name} must be an integer >= 1")
+        try:
+            resolved_int = int(resolved)
+        except (TypeError, ValueError) as exc:
+            raise RecorderError(f"{name} must be an integer >= 1") from exc
+        if isinstance(resolved, float) and resolved_int != resolved:
+            raise RecorderError(f"{name} must be an integer >= 1")
+        if resolved_int < 1:
+            raise RecorderError(f"{name} must be an integer >= 1")
+        return resolved_int
+
+    @staticmethod
+    def _resolve_optional_dimension(value: int | None, default: int | None, name: str) -> int | None:
+        resolved = default if value is None else value
+        if resolved is None:
+            return None
+        if isinstance(resolved, bool):
+            raise RecorderError(f"{name} must be an integer >= 1")
+        try:
+            resolved_int = int(resolved)
+        except (TypeError, ValueError) as exc:
+            raise RecorderError(f"{name} must be an integer >= 1") from exc
+        if isinstance(resolved, float) and resolved_int != resolved:
+            raise RecorderError(f"{name} must be an integer >= 1")
+        if resolved_int < 1:
+            raise RecorderError(f"{name} must be an integer >= 1")
+        return resolved_int
+
+    @staticmethod
+    def _resolve_quality(value: int | None, default: int, name: str) -> int:
+        resolved = default if value is None else value
+        if isinstance(resolved, bool):
+            raise RecorderError(f"{name} must be an integer between 1 and 100")
+        try:
+            resolved_int = int(resolved)
+        except (TypeError, ValueError) as exc:
+            raise RecorderError(f"{name} must be an integer between 1 and 100") from exc
+        if isinstance(resolved, float) and resolved_int != resolved:
+            raise RecorderError(f"{name} must be an integer between 1 and 100")
+        if resolved_int < 1 or resolved_int > 100:
+            raise RecorderError(f"{name} must be an integer between 1 and 100")
+        return resolved_int
+
+    def _positioning_status_locked(self) -> dict[str, Any]:
+        state = self._positioning_state
+        return {
+            "camera_id": self._config.camera_id,
+            "hostname": self._hostname,
+            "running": state is not None,
+            "state": self._lifecycle_state,
+            "settings": dict(state.settings) if state else None,
+            "snapshot_path": state.settings.get("snapshot_path") if state else None,
+            "stream_path": state.settings.get("stream_path") if state else None,
+            "started_at": state.started_at if state else None,
+            "updated_at": state.updated_at if state else None,
+            "frames_served": state.frames_served if state else 0,
+            "last_frame_at": state.last_frame_at if state else None,
+            "last_backend": state.last_backend if state else None,
+            "last_command": state.last_command if state else None,
+            "last_error": state.last_error if state else self._last_positioning_error,
+            "warnings": state.warnings if state else [],
+        }
+
+    def _record_positioning_error(self, error: str) -> None:
+        with self._lock:
+            self._last_positioning_error = error
+            if self._positioning_state is not None:
+                self._positioning_state.last_error = error
+            self._last_error = error
+
+    def _resolve_reference_still_label(
+        self,
+        stills_dir: Path,
+        requested_label: str | None,
+        force: bool,
+    ) -> tuple[str, list[str]]:
+        warnings: list[str] = []
+        if requested_label is None:
+            label = self._next_reference_label(stills_dir)
+        else:
+            label = requested_label
+
+        image_path = stills_dir / f"{label}.jpg"
+        manifest_path = stills_dir / f"{label}_manifest.json"
+        if force:
+            if image_path.exists() or manifest_path.exists():
+                warnings.append(f"force requested; overwriting existing reference still label {label}")
+            return label, warnings
+
+        if not image_path.exists() and not manifest_path.exists():
+            return label, warnings
+
+        base = label
+        index = 2
+        while True:
+            candidate = f"{base}_{index:03d}"
+            candidate_image = stills_dir / f"{candidate}.jpg"
+            candidate_manifest = stills_dir / f"{candidate}_manifest.json"
+            if not candidate_image.exists() and not candidate_manifest.exists():
+                warnings.append(f"label {label!r} already exists; using {candidate!r}")
+                return candidate, warnings
+            index += 1
+
+    @staticmethod
+    def _next_reference_label(stills_dir: Path) -> str:
+        highest = 0
+        if stills_dir.exists():
+            for child in stills_dir.iterdir():
+                if not child.is_file():
+                    continue
+                label = _reference_label_from_manifest_path(child) if child.name.endswith("_manifest.json") else child.stem
+                match = AUTO_REFERENCE_LABEL_PATTERN.fullmatch(label)
+                if match:
+                    highest = max(highest, int(match.group(1)))
+        return f"reference_{highest + 1:03d}"
+
+    @staticmethod
+    def _validate_still_label(label: str) -> None:
+        if STILL_LABEL_PATTERN.fullmatch(label) is None:
+            raise InvalidStillLabelError(
+                "label must start with an alphanumeric character and contain only letters, numbers, dots, underscores, or hyphens"
+            )
 
     def _calibration_context_for_prepare(
         self,
@@ -1477,6 +2061,17 @@ def _take_file_summaries(take_dir: Path, camera_dir: Path, recording_name: str |
     return files
 
 
+def _reference_still_file_summaries(image_path: Path, manifest_path: Path, camera_dir: Path) -> list[dict[str, Any]]:
+    image_summary = _file_summary(image_path, camera_dir)
+    image_summary["relative_path"] = str(image_path.relative_to(camera_dir))
+    image_summary["kind"] = "reference_still_image"
+
+    manifest_summary = _file_summary(manifest_path, camera_dir)
+    manifest_summary["relative_path"] = str(manifest_path.relative_to(camera_dir))
+    manifest_summary["kind"] = "reference_still_manifest"
+    return [image_summary, manifest_summary]
+
+
 def _file_kind(name: str, recording_name: str | None) -> str:
     if name == "manifest.json":
         return "manifest"
@@ -1485,6 +2080,11 @@ def _file_kind(name: str, recording_name: str | None) -> str:
     if recording_name and name == recording_name:
         return "recording"
     return "extra"
+
+
+def _reference_label_from_manifest_path(path: Path) -> str:
+    stem = path.stem
+    return stem[: -len("_manifest")] if stem.endswith("_manifest") else stem
 
 
 def _manifest_harvest_summary(manifest: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1511,6 +2111,53 @@ def _manifest_harvest_summary(manifest: dict[str, Any] | None) -> dict[str, Any]
         "errors",
     )
     return {field: manifest.get(field) for field in fields if field in manifest}
+
+
+def _still_manifest_harvest_summary(manifest: dict[str, Any] | None) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+    fields = (
+        "schema_version",
+        "status",
+        "session_id",
+        "camera_id",
+        "label",
+        "requested_label",
+        "timestamp",
+        "finished_at",
+        "hostname",
+        "service_version",
+        "image_file_name",
+        "requested_size",
+        "requested_quality",
+        "actual_file_size",
+        "backend",
+        "profile",
+        "use_recording_profile_controls",
+        "warnings",
+        "errors",
+        "state_before_capture",
+        "positioning_behavior",
+    )
+    return {field: manifest.get(field) for field in fields if field in manifest}
+
+
+def _still_capture_summary(manifest: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": manifest.get("status"),
+        "session_id": manifest.get("session_id"),
+        "camera_id": manifest.get("camera_id"),
+        "label": manifest.get("label"),
+        "timestamp": manifest.get("timestamp"),
+        "finished_at": manifest.get("finished_at"),
+        "image_file_path": manifest.get("image_file_path"),
+        "manifest_path": manifest.get("manifest_path"),
+        "actual_file_size": manifest.get("actual_file_size"),
+        "backend": manifest.get("backend"),
+        "profile": manifest.get("profile"),
+        "warnings": manifest.get("warnings", []),
+        "errors": manifest.get("errors", []),
+    }
 
 
 def _control_status(

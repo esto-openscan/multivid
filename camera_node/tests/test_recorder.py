@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from openscan_camera_node.config import CameraNodeConfig, NodeCameraControlPolicy
 from openscan_camera_node.profiles import load_recording_profiles
-from openscan_camera_node.recorder import RpicamVidRecorder
+from openscan_camera_node.recorder import AlreadyPositioningError, AlreadyRecordingError, RpicamVidRecorder
 
 
 class FakeProcess:
@@ -197,6 +198,126 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("--shutter", manifest["rpicam_vid_command"])
         self.assertIn("10000", manifest["rpicam_vid_command"])
 
+    def test_positioning_start_stop_and_overlay_normalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_recorder(Path(temp_dir))
+
+            status = recorder.start_positioning(
+                width=320,
+                height=180,
+                fps=3,
+                jpeg_quality=70,
+                overlays=["crosshair", "shorts-safe-area"],
+            )
+            full_status = recorder.status()
+            stopped = recorder.stop_positioning()
+
+        self.assertTrue(status["running"])
+        self.assertEqual(status["state"], "positioning")
+        self.assertEqual(status["settings"]["width"], 320)
+        self.assertEqual(status["settings"]["overlays"], ["crosshair", "shorts_safe_area"])
+        self.assertTrue(full_status["positioning_running"])
+        self.assertFalse(full_status["recording_allowed"])
+        self.assertFalse(stopped["running"])
+        self.assertEqual(stopped["state"], "idle")
+
+    def test_positioning_snapshot_uses_jpeg_backend_and_updates_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_recorder(Path(temp_dir))
+            recorder.start_positioning(width=320, height=180, fps=5, overlays=[])
+
+            with (
+                patch("openscan_camera_node.imaging.shutil.which", return_value="/usr/bin/rpicam-still"),
+                patch("openscan_camera_node.imaging.subprocess.run", side_effect=_fake_jpeg_run),
+            ):
+                image_bytes, metadata = recorder.positioning_snapshot()
+                status = recorder.positioning_status()
+
+        self.assertEqual(image_bytes, b"jpeg")
+        self.assertEqual(metadata["backend"], "rpicam-still")
+        self.assertEqual(status["frames_served"], 1)
+        self.assertEqual(status["last_backend"], "rpicam-still")
+
+    def test_recording_is_rejected_while_positioning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_recorder(Path(temp_dir))
+            recorder.start_positioning()
+
+            with self.assertRaises(AlreadyPositioningError):
+                recorder.start("session-1", "video")
+
+            status = recorder.status()
+
+        self.assertEqual(status["state"], "positioning")
+        self.assertTrue(status["positioning_running"])
+        self.assertIn("stop positioning first", status["last_error"])
+
+    def test_reference_still_is_rejected_while_recording_or_positioning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_recorder(Path(temp_dir))
+            process = FakeProcess(pid=11111)
+            with (
+                patch("openscan_camera_node.recorder.subprocess.Popen", return_value=process),
+                patch("openscan_camera_node.recorder.os.killpg"),
+            ):
+                recorder.start("session-1", "video")
+                with self.assertRaises(AlreadyRecordingError):
+                    recorder.capture_reference_still("session-1", label="alignment_001")
+                recorder.stop()
+            recorder.start_positioning()
+            with self.assertRaises(AlreadyPositioningError):
+                recorder.capture_reference_still("session-1", label="alignment_001")
+
+    def test_reference_still_capture_writes_manifest_and_unique_labels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_recorder(Path(temp_dir))
+
+            with (
+                patch("openscan_camera_node.imaging.shutil.which", return_value="/usr/bin/rpicam-still"),
+                patch("openscan_camera_node.imaging.subprocess.run", side_effect=_fake_jpeg_run),
+            ):
+                first = recorder.capture_reference_still(
+                    "session-1",
+                    label="alignment_001",
+                    profile_name="video",
+                    quality=90,
+                )
+                second = recorder.capture_reference_still(
+                    "session-1",
+                    label="alignment_001",
+                    profile_name="video",
+                    quality=90,
+                )
+                summary = recorder.session_summary("session-1")
+
+            camera_dir = Path(temp_dir) / "sessions" / "session-1" / "cam-a"
+            first_manifest = json.loads(
+                (camera_dir / "reference_stills" / "alignment_001_manifest.json").read_text(encoding="utf-8")
+            )
+            second_manifest = json.loads(
+                (camera_dir / "reference_stills" / "alignment_001_002_manifest.json").read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(first["still_capture"]["status"], "completed")
+        self.assertEqual(first["still_capture"]["label"], "alignment_001")
+        self.assertEqual(second["still_capture"]["label"], "alignment_001_002")
+        self.assertIn("already exists", "\n".join(second_manifest["warnings"]))
+        self.assertEqual(first_manifest["session_id"], "session-1")
+        self.assertEqual(first_manifest["camera_id"], "cam-a")
+        self.assertEqual(first_manifest["profile"], "video")
+        self.assertEqual(first_manifest["requested_quality"], 90)
+        self.assertEqual(first_manifest["actual_file_size"], 4)
+        self.assertEqual(first_manifest["backend"], "rpicam-still")
+        self.assertTrue(first_manifest["use_recording_profile_controls"])
+        self.assertEqual(first_manifest["applied_controls"]["shutter_us"], 20000)
+        self.assertEqual(summary["take_count"], 0)
+        self.assertEqual(summary["reference_still_count"], 2)
+        image_paths = {
+            still["files"][0]["relative_path"]
+            for still in summary["reference_stills"]
+        }
+        self.assertIn("reference_stills/alignment_001.jpg", image_paths)
+
 
 def _new_recorder(root: Path) -> RpicamVidRecorder:
     profiles_path = root / "profiles.yml"
@@ -289,6 +410,12 @@ profiles:
         ),
     )
     return RpicamVidRecorder(config=config, profiles=load_recording_profiles(profiles_path))
+
+
+def _fake_jpeg_run(command: list[str], **_kwargs: object) -> SimpleNamespace:
+    output_file = Path(command[command.index("--output") + 1])
+    output_file.write_bytes(b"jpeg")
+    return SimpleNamespace(returncode=0, stderr="")
 
 
 if __name__ == "__main__":

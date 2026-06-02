@@ -19,6 +19,18 @@ openscan_camera_node_listen_host: "0.0.0.0"
 openscan_camera_node_listen_port: 8080
 openscan_camera_control_policy_use_calibration_suggestions: false
 openscan_camera_control_policy_apply_suggestions_to_recording: false
+openscan_positioning_width: 640
+openscan_positioning_height: 360
+openscan_positioning_fps: 5
+openscan_positioning_jpeg_quality: 75
+openscan_positioning_overlays:
+  - camera_label
+  - crosshair
+  - shorts_safe_area
+openscan_reference_stills_quality: 95
+openscan_reference_stills_width: null
+openscan_reference_stills_height: null
+openscan_reference_stills_use_recording_profile_controls: true
 openscan_camera_node_profile_overrides: {}
 openscan_camera_boot_config_lines:
   - regexp: '^#?\s*camera_auto_detect=.*$'

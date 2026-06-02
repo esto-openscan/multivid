@@ -131,6 +131,9 @@ def build_session_index(
         if not isinstance(summary, dict):
             summary = {}
         source_takes = summary.get("takes") if isinstance(summary.get("takes"), list) else []
+        source_reference_stills = (
+            summary.get("reference_stills") if isinstance(summary.get("reference_stills"), list) else []
+        )
 
         seen_take_ids: set[str] = set()
         takes: list[dict[str, Any]] = []
@@ -196,6 +199,70 @@ def build_session_index(
                 }
             )
 
+        reference_stills: list[dict[str, Any]] = []
+        for source_still in source_reference_stills:
+            if not isinstance(source_still, dict):
+                continue
+            label = str(source_still.get("label") or "")
+            if not label:
+                continue
+            image_relative = _reference_still_source_relative_path(source_still, "reference_still_image")
+            manifest_relative = _reference_still_source_relative_path(source_still, "reference_still_manifest")
+            image_path = local_node_dir / image_relative if image_relative else None
+            manifest_path = local_node_dir / manifest_relative if manifest_relative else None
+            still_manifest = _read_json(manifest_path) if manifest_path and manifest_path.exists() else None
+            manifest_summary = _reference_still_manifest_summary(still_manifest)
+            source_warnings = source_still.get("warnings") if isinstance(source_still.get("warnings"), list) else []
+            source_errors = source_still.get("errors") if isinstance(source_still.get("errors"), list) else []
+            manifest_warnings = (
+                manifest_summary.get("warnings") if isinstance(manifest_summary.get("warnings"), list) else []
+            )
+            manifest_errors = (
+                manifest_summary.get("errors") if isinstance(manifest_summary.get("errors"), list) else []
+            )
+            warnings = _dedupe(
+                [
+                    *[str(item) for item in source_warnings if item],
+                    *[str(item) for item in manifest_warnings if item],
+                ]
+            )
+            errors = _dedupe(
+                [
+                    *[str(item) for item in source_errors if item],
+                    *[str(item) for item in manifest_errors if item],
+                ]
+            )
+            if image_path is None:
+                errors.append("reference still image path could not be determined")
+            elif not image_path.exists():
+                errors.append(f"{image_path.name} is missing")
+            elif image_path.stat().st_size <= 0:
+                errors.append(f"{image_path.name} is empty")
+            if manifest_path is None:
+                errors.append("reference still manifest path could not be determined")
+            elif not manifest_path.exists():
+                errors.append(f"{manifest_path.name} is missing")
+            reference_stills.append(
+                {
+                    "label": label,
+                    "status": "ok" if not errors else "incomplete",
+                    "timestamp": manifest_summary.get("timestamp") or source_still.get("timestamp"),
+                    "image_relative_path": _relative(image_path, session_dir) if image_path is not None else None,
+                    "image_file_size": image_path.stat().st_size if image_path and image_path.exists() else None,
+                    "manifest_relative_path": _relative(manifest_path, session_dir) if manifest_path is not None else None,
+                    "manifest_summary": manifest_summary,
+                    "warnings": warnings,
+                    "errors": _dedupe(errors),
+                    "files": _reference_still_local_file_entries(
+                        source_still,
+                        local_node_dir=local_node_dir,
+                        session_dir=session_dir,
+                        hash_small_files=hash_small_files,
+                        hash_video_files=hash_video_files,
+                    ),
+                }
+            )
+
         prepared_path = local_node_dir / "prepared_state.json"
         prepared_state = _read_json(prepared_path) if prepared_path.exists() else None
         node_errors = list(report.get("errors", []))
@@ -218,6 +285,8 @@ def build_session_index(
                 "prepared_state_present": prepared_path.exists(),
                 "prepared_state_summary": _prepared_summary(prepared_state),
                 "takes": takes,
+                "reference_stills": reference_stills,
+                "reference_still_count": len(reference_stills),
                 "warnings": _dedupe(node_warnings),
                 "errors": _dedupe(node_errors),
                 "missing_files": report.get("missing_files", []),
@@ -463,6 +532,28 @@ def _remote_file_specs(summary: dict[str, Any]) -> list[dict[str, Any]]:
                     "missing": not bool(file_info.get("exists", False)),
                 }
             )
+    reference_stills = summary.get("reference_stills") if isinstance(summary.get("reference_stills"), list) else []
+    for still in reference_stills:
+        if not isinstance(still, dict):
+            continue
+        files = still.get("files") if isinstance(still.get("files"), list) else []
+        for file_info in files:
+            if not isinstance(file_info, dict):
+                continue
+            relative_path = file_info.get("relative_path")
+            name = file_info.get("name")
+            if not isinstance(relative_path, str) or not relative_path:
+                if not isinstance(name, str) or not name:
+                    continue
+                relative_path = f"reference_stills/{name}"
+            specs.append(
+                {
+                    "relative_path": relative_path,
+                    "size": file_info.get("size"),
+                    "mtime": file_info.get("mtime"),
+                    "missing": not bool(file_info.get("exists", False)),
+                }
+            )
     return specs
 
 
@@ -571,6 +662,35 @@ def _manifest_summary(manifest: dict[str, Any] | None) -> dict[str, Any]:
     return {field: manifest.get(field) for field in fields if field in manifest}
 
 
+def _reference_still_manifest_summary(manifest: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(manifest, dict):
+        return {}
+    fields = (
+        "schema_version",
+        "status",
+        "session_id",
+        "camera_id",
+        "label",
+        "requested_label",
+        "timestamp",
+        "finished_at",
+        "hostname",
+        "service_version",
+        "image_file_name",
+        "requested_size",
+        "requested_quality",
+        "actual_file_size",
+        "backend",
+        "profile",
+        "use_recording_profile_controls",
+        "warnings",
+        "errors",
+        "state_before_capture",
+        "positioning_behavior",
+    )
+    return {field: manifest.get(field) for field in fields if field in manifest}
+
+
 def _prepared_summary(prepared_state: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(prepared_state, dict):
         return {}
@@ -603,6 +723,25 @@ def _recording_name(source_take: dict[str, Any], manifest: dict[str, Any] | None
     return None
 
 
+def _reference_still_source_relative_path(source_still: dict[str, Any], kind: str) -> str | None:
+    files = source_still.get("files") if isinstance(source_still.get("files"), list) else []
+    for file_info in files:
+        if not isinstance(file_info, dict) or file_info.get("kind") != kind:
+            continue
+        relative_path = file_info.get("relative_path")
+        if isinstance(relative_path, str) and relative_path:
+            return relative_path
+        name = file_info.get("name")
+        if isinstance(name, str) and name:
+            return f"reference_stills/{name}"
+
+    key = "image_file_name" if kind == "reference_still_image" else "manifest_file_name"
+    name = source_still.get(key)
+    if isinstance(name, str) and name:
+        return f"reference_stills/{name}"
+    return None
+
+
 def _local_file_entries(
     path: Path,
     base_dir: Path,
@@ -619,6 +758,40 @@ def _local_file_entries(
         entry = {"name": child.name, "relative_path": _relative(child, base_dir), "size": size}
         if _should_hash(child, size, hash_small_files, hash_video_files):
             entry["sha256"] = _sha256(child)
+        entries.append(entry)
+    return entries
+
+
+def _reference_still_local_file_entries(
+    source_still: dict[str, Any],
+    local_node_dir: Path,
+    session_dir: Path,
+    hash_small_files: bool,
+    hash_video_files: bool,
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    files = source_still.get("files") if isinstance(source_still.get("files"), list) else []
+    for file_info in files:
+        if not isinstance(file_info, dict):
+            continue
+        relative_path = file_info.get("relative_path")
+        name = file_info.get("name")
+        if not isinstance(relative_path, str) or not relative_path:
+            if not isinstance(name, str) or not name:
+                continue
+            relative_path = f"reference_stills/{name}"
+        local_path = local_node_dir / relative_path
+        exists = local_path.exists()
+        size = local_path.stat().st_size if exists else None
+        entry: dict[str, Any] = {
+            "name": local_path.name,
+            "kind": file_info.get("kind"),
+            "relative_path": _relative(local_path, session_dir),
+            "exists": exists,
+            "size": size,
+        }
+        if exists and isinstance(size, int) and _should_hash(local_path, size, hash_small_files, hash_video_files):
+            entry["sha256"] = _sha256(local_path)
         entries.append(entry)
     return entries
 

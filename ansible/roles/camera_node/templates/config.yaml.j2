@@ -5,5 +5,19 @@ output_root: "{{ openscan_sessions_root }}"
 camera_control_policy:
   use_calibration_suggestions: {{ openscan_camera_control_policy_use_calibration_suggestions | default(false) | bool | lower }}
   apply_suggestions_to_recording: {{ openscan_camera_control_policy_apply_suggestions_to_recording | default(false) | bool | lower }}
+positioning:
+  width: {{ openscan_positioning_width | default(640) }}
+  height: {{ openscan_positioning_height | default(360) }}
+  fps: {{ openscan_positioning_fps | default(5) }}
+  jpeg_quality: {{ openscan_positioning_jpeg_quality | default(75) }}
+  overlays:
+{% for overlay in openscan_positioning_overlays | default(['camera_label', 'crosshair', 'shorts_safe_area']) %}
+    - {{ overlay }}
+{% endfor %}
+reference_stills:
+  quality: {{ openscan_reference_stills_quality | default(95) }}
+  width: {{ openscan_reference_stills_width | default(none) | to_json }}
+  height: {{ openscan_reference_stills_height | default(none) | to_json }}
+  use_recording_profile_controls: {{ openscan_reference_stills_use_recording_profile_controls | default(true) | bool | lower }}
 profile_overrides:
 {{ openscan_camera_node_profile_overrides | default({}) | to_nice_yaml(indent=2, sort_keys=False) | indent(2, true) }}

@@ -14,6 +14,7 @@ from openscan_multicam_coordinator.config import NodeConfig, load_nodes_config
 from openscan_multicam_coordinator.harvest import (
     HarvestOptions,
     _copy_remote_file,
+    _remote_file_specs,
     build_rsync_command,
     build_session_index,
     harvest_session,
@@ -120,6 +121,52 @@ nodes:
         self.assertIn("manifest.json", take["missing_expected_files"])
         self.assertIn("manifest.json is missing or unreadable", take["errors"])
         self.assertIn("recording.h264 is empty", take["errors"])
+
+    def test_reference_stills_are_copy_specs_and_index_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_dir = Path(temp_dir) / "harvested" / "session-1"
+            stills_dir = session_dir / "nodes" / "front" / "reference_stills"
+            stills_dir.mkdir(parents=True)
+            (stills_dir / "alignment_001.jpg").write_bytes(b"jpeg")
+            manifest = {
+                "schema_version": 1,
+                "status": "completed",
+                "session_id": "session-1",
+                "camera_id": "front",
+                "label": "alignment_001",
+                "timestamp": "2026-06-02T10:00:00Z",
+                "image_file_name": "alignment_001.jpg",
+                "actual_file_size": 4,
+                "backend": "rpicam-still",
+                "warnings": ["operator note"],
+                "errors": [],
+            }
+            (stills_dir / "alignment_001_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            node = NodeConfig(name="cam-front", camera_id="front", base_url="http://cam-front.local:8080")
+            summary = _remote_summary_with_reference_still("session-1", "front")
+            report = {
+                "node_name": "cam-front",
+                "status": "complete",
+                "remote_session_summary": summary,
+                "errors": [],
+                "warnings": [],
+                "missing_files": [],
+            }
+
+            specs = _remote_file_specs(summary)
+            index = build_session_index("session-1", session_dir, [node], [report], hash_small_files=True)
+
+        spec_paths = {spec["relative_path"] for spec in specs}
+        self.assertIn("reference_stills/alignment_001.jpg", spec_paths)
+        self.assertIn("reference_stills/alignment_001_manifest.json", spec_paths)
+        node_index = index["nodes"][0]
+        self.assertEqual(node_index["reference_still_count"], 1)
+        still = node_index["reference_stills"][0]
+        self.assertEqual(still["label"], "alignment_001")
+        self.assertEqual(still["status"], "ok")
+        self.assertEqual(still["manifest_summary"]["backend"], "rpicam-still")
+        self.assertIn("operator note", still["warnings"])
+        self.assertEqual(index["takes"], [])
 
     def test_copy_remote_file_warns_on_conflict_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -280,6 +327,34 @@ def _remote_summary(session_id: str, camera_id: str) -> dict[str, object]:
             }
         ],
     }
+
+
+def _remote_summary_with_reference_still(session_id: str, camera_id: str) -> dict[str, object]:
+    summary = _remote_summary(session_id, camera_id)
+    summary["takes"] = []
+    summary["reference_stills"] = [
+        {
+            "label": "alignment_001",
+            "timestamp": "2026-06-02T10:00:00Z",
+            "files": [
+                {
+                    "name": "alignment_001.jpg",
+                    "relative_path": "reference_stills/alignment_001.jpg",
+                    "kind": "reference_still_image",
+                    "exists": True,
+                    "size": 4,
+                },
+                {
+                    "name": "alignment_001_manifest.json",
+                    "relative_path": "reference_stills/alignment_001_manifest.json",
+                    "kind": "reference_still_manifest",
+                    "exists": True,
+                    "size": 200,
+                },
+            ],
+        }
+    ]
+    return summary
 
 
 def _fake_client(responses: dict[str, dict[str, object]]):

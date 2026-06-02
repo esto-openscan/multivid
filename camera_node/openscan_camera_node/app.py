@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from . import __version__
 from .config import default_profiles_path, load_camera_node_config
 from .profiles import load_recording_profiles
 from .recorder import (
+    AlreadyPositioningError,
     AlreadyRecordingError,
+    CameraBusyError,
     InvalidCalibrationIdError,
     InvalidSessionIdError,
+    InvalidStillLabelError,
     InvalidTakeIdError,
     RecorderError,
     RpicamVidRecorder,
@@ -60,6 +65,35 @@ class CalibrationRunRequest(BaseModel):
 class CalibrationApplyRequest(BaseModel):
     session_id: str = Field(min_length=1)
     calibration_id: str | None = None
+
+
+class PositioningStartRequest(BaseModel):
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    fps: int | None = Field(default=None, gt=0)
+    jpeg_quality: int | None = Field(default=None, ge=1, le=100)
+    overlay: str | list[str] | None = None
+    overlays: list[str] | None = None
+    profile: str | None = None
+
+    def overlay_values(self) -> list[str] | None:
+        if self.overlays is not None:
+            return self.overlays
+        if self.overlay is None:
+            return None
+        return [self.overlay] if isinstance(self.overlay, str) else self.overlay
+
+
+class StillCaptureRequest(BaseModel):
+    session_id: str = Field(min_length=1)
+    label: str | None = None
+    profile: str | None = None
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    quality: int | None = Field(default=None, ge=1, le=100)
+    notes: str | None = None
+    use_recording_profile_controls: bool | None = None
+    force: bool = False
 
 
 def create_app(config_path: str | Path | None = None, profiles_path: str | Path | None = None) -> FastAPI:
@@ -136,6 +170,10 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (InvalidSessionIdError, InvalidTakeIdError, UnknownProfileError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except AlreadyPositioningError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CameraBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except RecorderError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except FileNotFoundError as exc:
@@ -159,6 +197,10 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
                 refocus=request.refocus,
             )
         except AlreadyRecordingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except AlreadyPositioningError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CameraBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (InvalidSessionIdError, UnknownProfileError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -189,6 +231,10 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
                 apply_to_session=request.apply_to_session,
             )
         except AlreadyRecordingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except AlreadyPositioningError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CameraBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         except (InvalidCalibrationIdError, InvalidSessionIdError, UnknownProfileError) as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -223,7 +269,104 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
         except RecorderError as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    @app.post("/positioning/start", status_code=202)
+    def positioning_start(request: PositioningStartRequest) -> dict[str, Any]:
+        try:
+            return recorder.start_positioning(
+                width=request.width,
+                height=request.height,
+                fps=request.fps,
+                jpeg_quality=request.jpeg_quality,
+                overlays=request.overlay_values(),
+                profile_name=request.profile,
+            )
+        except AlreadyRecordingError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except CameraBusyError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except UnknownProfileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RecorderError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/positioning/stop")
+    def positioning_stop() -> dict[str, Any]:
+        return recorder.stop_positioning()
+
+    @app.get("/positioning/status")
+    def positioning_status() -> dict[str, Any]:
+        return recorder.positioning_status()
+
+    @app.get("/positioning/snapshot.jpg")
+    def positioning_snapshot() -> Response:
+        try:
+            image_bytes, metadata = recorder.positioning_snapshot()
+        except RecorderError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return Response(
+            content=image_bytes,
+            media_type="image/jpeg",
+            headers={
+                "Cache-Control": "no-store",
+                "X-OpenScan-Captured-At": str(metadata.get("captured_at", "")),
+            },
+        )
+
+    @app.get("/positioning/stream.mjpg")
+    def positioning_stream() -> StreamingResponse:
+        if not recorder.positioning_running():
+            raise HTTPException(status_code=409, detail="positioning preview is not running; call POST /positioning/start first")
+        return StreamingResponse(
+            _mjpeg_stream(recorder),
+            media_type="multipart/x-mixed-replace; boundary=openscan-positioning",
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.post("/stills/capture", status_code=202)
+    def stills_capture(request: StillCaptureRequest) -> dict[str, Any]:
+        try:
+            return recorder.capture_reference_still(
+                session_id=request.session_id,
+                label=request.label,
+                profile_name=request.profile,
+                width=request.width,
+                height=request.height,
+                quality=request.quality,
+                notes=request.notes,
+                use_recording_profile_controls=request.use_recording_profile_controls,
+                force=request.force,
+            )
+        except (AlreadyRecordingError, AlreadyPositioningError, CameraBusyError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (InvalidSessionIdError, InvalidStillLabelError, UnknownProfileError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except RecorderError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.get("/stills/status")
+    def stills_status() -> dict[str, Any]:
+        return recorder.stills_status()
+
     return app
+
+
+def _mjpeg_stream(recorder: RpicamVidRecorder):
+    boundary = b"--openscan-positioning\r\n"
+    while recorder.positioning_running():
+        try:
+            image_bytes, _metadata = recorder.positioning_snapshot()
+        except RecorderError:
+            break
+        yield (
+            boundary
+            + b"Content-Type: image/jpeg\r\n"
+            + f"Content-Length: {len(image_bytes)}\r\n\r\n".encode("ascii")
+            + image_bytes
+            + b"\r\n"
+        )
+        time.sleep(recorder.positioning_frame_interval_seconds())
 
 
 def main() -> None:

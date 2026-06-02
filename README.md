@@ -33,7 +33,7 @@ Start with:
 - A camera connected to each Pi and confirmed working.
 - A developer laptop with Ansible installed.
 
-Current Raspberry Pi OS Lite includes the `rpicam-apps-lite` package, which provides `rpicam-vid`. The Ansible defaults also ensure that package is present.
+Current Raspberry Pi OS Lite includes the `rpicam-apps-lite` package, which provides `rpicam-vid` and the still-image tools used for positioning/reference JPEGs. The Ansible defaults also ensure that package is present.
 
 For the Arducam IMX519 modules used by this MVP, Ansible also writes these lines into the Raspberry Pi boot config and reboots the node when needed:
 
@@ -130,6 +130,13 @@ Each node exposes:
 - `GET /calibration/status`
 - `GET /calibration/last`
 - `POST /calibration/apply-to-session`
+- `POST /positioning/start`
+- `POST /positioning/stop`
+- `GET /positioning/status`
+- `GET /positioning/snapshot.jpg`
+- `GET /positioning/stream.mjpg`
+- `POST /stills/capture`
+- `GET /stills/status`
 
 Start requests use this JSON body:
 
@@ -199,6 +206,20 @@ The service loads:
 camera_control_policy:
   use_calibration_suggestions: false
   apply_suggestions_to_recording: false
+positioning:
+  width: 640
+  height: 360
+  fps: 5
+  jpeg_quality: 75
+  overlays:
+    - camera_label
+    - crosshair
+    - shorts_safe_area
+reference_stills:
+  quality: 95
+  width: null
+  height: null
+  use_recording_profile_controls: true
 ```
 
 Leave `apply_suggestions_to_recording` false unless you deliberately want the node to pass suggested lock values to `rpicam-vid`.
@@ -216,6 +237,92 @@ The manifest for each take is written to:
 ```
 
 `rpicam-vid` stderr is captured next to the recording as `rpicam-vid.stderr.log`.
+
+## Positioning preview
+
+Positioning preview is a low-resolution, low-framerate setup mode for physically aligning camera nodes before recording. It is intentionally not a final recording mode and not a high-quality livestream.
+
+Start preview across all configured nodes:
+
+```bash
+multicam --nodes examples/nodes.yml positioning-start --overlay crosshair --overlay shorts-safe-area
+```
+
+Useful options:
+
+```bash
+multicam --nodes examples/nodes.yml positioning-start --width 640 --height 360 --fps 5
+multicam --nodes examples/nodes.yml positioning-status
+multicam --nodes examples/nodes.yml positioning-urls
+```
+
+`positioning-urls` prints browser-openable URLs for each node:
+
+```text
+http://cam-front.local:8080/positioning/snapshot.jpg
+http://cam-front.local:8080/positioning/stream.mjpg
+```
+
+Supported overlays are:
+
+- `camera-label`
+- `crosshair`
+- `grid`
+- `shorts-safe-area`
+
+The node enters the `positioning` state while preview is active. Recording, calibration, and reference still capture are rejected while positioning is active. Stop preview before recording:
+
+```bash
+multicam --nodes examples/nodes.yml positioning-stop
+```
+
+## Reference stills
+
+Reference stills are high-quality JPEGs for focus, framing, lighting, and 9:16 crop checks before a real take. They are not scan images and are not recording takes.
+
+Capture one still per node:
+
+```bash
+multicam --nodes examples/nodes.yml stills-capture --session test-001 --label alignment_001
+```
+
+Optional controls:
+
+```bash
+multicam --nodes examples/nodes.yml stills-capture --session test-001 --label alignment_001 --profile video_1080p25_locked
+multicam --nodes examples/nodes.yml stills-status
+```
+
+Each node stores reference stills under:
+
+```text
+/srv/openscan-camera/sessions/<session_id>/<camera_id>/reference_stills/
+```
+
+Example:
+
+```text
+reference_stills/
+  alignment_001.jpg
+  alignment_001_manifest.json
+```
+
+The still manifest records session, camera, label, timestamp, hostname, service version, output path, requested size/quality, actual file size, backend command, optional profile/control snapshot, warnings, errors, and the state before capture.
+
+For safety, the MVP rejects reference still capture while recording, calibrating, or positioning. If a label already exists, the node generates a unique suffix such as `alignment_001_002` unless `force` is explicitly requested through the API/CLI.
+
+## Recommended setup workflow
+
+1. Boot nodes.
+2. Run `multicam positioning-start`.
+3. Open preview URLs from `multicam positioning-urls`.
+4. Physically align cameras.
+5. Stop positioning with `multicam positioning-stop`.
+6. Capture reference stills with `multicam stills-capture --session <session_id> --label alignment_001`.
+7. Check focus, framing, lighting, and 9:16 crop suitability.
+8. Start the recording session.
+9. Stop recording.
+10. Harvest the session.
 
 ## Harvesting a session
 
@@ -252,13 +359,21 @@ harvested_sessions/
           recording.h264
           manifest.json
           rpicam-vid.stderr.log
+        reference_stills/
+          alignment_001.jpg
+          alignment_001_manifest.json
       side/
         prepared_state.json
         take_001/
           recording.h264
           manifest.json
           rpicam-vid.stderr.log
+        reference_stills/
+          alignment_001.jpg
+          alignment_001_manifest.json
 ```
+
+Harvesting copies `reference_stills/*.jpg` and `reference_stills/*_manifest.json`. `session_index.json` includes `reference_stills` per node with label, file paths, timestamp, manifest summary, warnings, and errors. Reference stills are indexed separately and are not treated as recording takes.
 
 Configure harvesting in `examples/nodes.yml`:
 
@@ -322,7 +437,7 @@ Harvesting is idempotent. If a local file already exists and the remote size and
 - No video rendering.
 - No timelapse generation.
 - No split-screen output.
-- No overlays.
+- No rendered video overlays.
 - No shorts.
 - No editor timeline export.
 
@@ -333,6 +448,7 @@ The camera-node service tracks a simple lifecycle:
 - `idle`
 - `preparing`
 - `armed`
+- `positioning`
 - `recording`
 - `stopping`
 - `completed`
@@ -357,6 +473,8 @@ multicam --nodes examples/nodes.yml prepare-reset --session test-001
 ```
 
 Status output includes state, backend, prepared session/profile validity, recording session/take/profile, output path, PID, last error, free disk space, service version, resolved controls, applied controls, unsupported controls, and warnings.
+
+Status output also includes `positioning_running`, active positioning settings and preview paths, `last_positioning_error`, `last_still_capture`, and `allowed` booleans for recording, positioning, calibration, and still capture.
 
 Each take manifest includes the session, take, camera, hostname, service version, profile snapshot after node overrides, prepared-state snapshot, requested controls, resolved controls, controls actually passed to `rpicam-vid`, unsupported controls, start/stop times, pre-roll seconds, usable start offset/time, output file path, full command, PID, exit code, warnings, and errors.
 
@@ -489,6 +607,16 @@ The resolved profile snapshot is stored in each `manifest.json`. `requested_cont
 - No complicated synchronization.
 - No camera discovery.
 - No production secret handling beyond documenting where Ansible Vault should be used.
+
+## What Milestone 4.5 intentionally does not do
+
+- No high-quality livestreaming.
+- No recording while positioning.
+- No automatic camera angle scoring.
+- No automatic focus scoring.
+- No still gallery UI.
+- No video rendering.
+- No clip factory or stringout generation.
 
 ## Next steps
 

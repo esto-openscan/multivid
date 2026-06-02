@@ -2,6 +2,7 @@ ansible_user: pi
 
 openscan_service_user: openscan
 openscan_service_group: openscan
+openscan_service_home: /var/lib/openscan-camera
 openscan_service_extra_groups:
   - video
   - render
@@ -47,7 +48,15 @@ openscan_common_packages:
   - ca-certificates
   - git
   - curl
+  - rsync
   - rpicam-apps-lite
+
+openscan_harvest_ssh_enabled: true
+openscan_harvest_ssh_user: "{{ openscan_service_user }}"
+openscan_harvest_ssh_home: "{{ openscan_service_home }}"
+openscan_harvest_ssh_shell: /bin/bash
+openscan_harvest_ssh_public_key_file: "{{ lookup('ansible.builtin.env', 'HOME') }}/.ssh/id_ed25519.pub"
+openscan_harvest_ssh_authorized_keys: []
 
 openscan_samba_workgroup: WORKGROUP
 openscan_samba_share_name: openscan-camera

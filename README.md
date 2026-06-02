@@ -10,8 +10,9 @@ The shape is deliberately simple:
 - Recordings are written under `/srv/openscan-camera/sessions/<session_id>/<camera_id>/<take_id>/`.
 - `/srv/openscan-camera` is shared over Samba.
 - A small coordinator CLI sends concurrent HTTP requests to all configured nodes.
+- The coordinator can harvest a completed distributed session into one local archive.
 
-There is no Docker, no Swarm, no web UI, no harvesting, and no video postprocessing in this MVP.
+There is no Docker, no Swarm, no web UI, and no video postprocessing in this MVP.
 
 ## Repository Layout
 
@@ -98,7 +99,13 @@ The example config also enables Arducam's Pivariety installer with `openscan_ard
    multicam --nodes examples/nodes.yml stop
    ```
 
-10. Access recordings through Samba:
+10. Harvest the distributed recording into one local session folder:
+
+   ```bash
+   multicam --nodes examples/nodes.yml harvest --session test-001 --output ./harvested_sessions
+   ```
+
+11. Access recordings manually through Samba when needed:
 
    ```text
    smb://cam-front.local/openscan-camera
@@ -111,6 +118,10 @@ Each node exposes:
 - `GET /health`
 - `GET /status`
 - `GET /profiles`
+- `GET /sessions`
+- `GET /sessions/{session_id}`
+- `GET /sessions/{session_id}/takes`
+- `GET /sessions/{session_id}/manifest-summary`
 - `POST /recordings/start`
 - `POST /recordings/stop`
 - `POST /prepare`
@@ -205,6 +216,115 @@ The manifest for each take is written to:
 ```
 
 `rpicam-vid` stderr is captured next to the recording as `rpicam-vid.stderr.log`.
+
+## Harvesting a session
+
+Recording happens on the camera nodes. Harvesting is the next step: the coordinator collects each node's session files into one central folder so later rendering/editing tools have a reproducible local archive to consume.
+
+The first harvesting backend is `rsync_ssh`. Samba remains useful for manual browsing, but the harvester gives a repeatable command, a stable folder structure, and machine-readable `session_index.json` plus `harvest_report.json`.
+
+Example workflow:
+
+```bash
+multicam --nodes examples/nodes.yml start --session benchy_scan_001 --profile video_1080p25_locked
+multicam --nodes examples/nodes.yml stop
+multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --output ./harvested_sessions
+```
+
+Inspect:
+
+```text
+harvested_sessions/benchy_scan_001/session_index.json
+harvested_sessions/benchy_scan_001/harvest_report.json
+```
+
+The harvested structure is:
+
+```text
+harvested_sessions/
+  benchy_scan_001/
+    session_index.json
+    harvest_report.json
+    nodes/
+      front/
+        prepared_state.json
+        take_001/
+          recording.h264
+          manifest.json
+          rpicam-vid.stderr.log
+      side/
+        prepared_state.json
+        take_001/
+          recording.h264
+          manifest.json
+          rpicam-vid.stderr.log
+```
+
+Configure harvesting in `examples/nodes.yml`:
+
+```yaml
+nodes:
+  - name: cam-front
+    camera_id: front
+    base_url: http://multivid-cam-front.local:8080
+    ssh_host: multivid-cam-front.local
+    ssh_user: openscan
+    remote_output_root: /srv/openscan-camera/sessions
+    local_alias: front
+```
+
+`remote_output_root` may point either at the service session root, such as `/srv/openscan-camera/sessions`, or at the service share root, such as `/srv/openscan-camera`. The harvester normalizes both forms when building remote paths.
+
+Ansible provisions this SSH harvest path by default:
+
+- Installs `rsync` on camera nodes.
+- Gives the `openscan` service user a login shell for key-based SSH harvesting.
+- Uses `/var/lib/openscan-camera` as the `openscan` home so SSH `authorized_keys` is not placed in the group-writable Samba share.
+- Installs the coordinator user's public key from `~/.ssh/id_ed25519.pub`.
+
+If that key does not exist yet, create it before running Ansible:
+
+```bash
+ssh-keygen -t ed25519
+ansible-playbook -i ansible/inventory.yml ansible/playbooks/site.yml -K
+```
+
+Use `-k` only when Ansible should connect over SSH password instead of your existing SSH key. Password SSH requires `sshpass` on the coordinator.
+
+To use a different public key or explicit key list, set:
+
+```yaml
+openscan_harvest_ssh_public_key_file: /path/to/key.pub
+openscan_harvest_ssh_authorized_keys:
+  - ssh-ed25519 AAAA...
+```
+
+After provisioning, this should work without a password prompt:
+
+```bash
+ssh openscan@multivid-cam-front.local 'ls -la /srv/openscan-camera/sessions'
+```
+
+Useful options:
+
+```bash
+multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --dry-run
+multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --node cam-front
+multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --overwrite
+multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --allow-partial
+multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --hash-video
+```
+
+Harvesting is idempotent. If a local file already exists and the remote size and mtime match, it is reported as unchanged. If a local file exists with different metadata, the harvester does not overwrite it unless `--overwrite` is set. Offline nodes, missing sessions, missing manifests, missing recordings, empty recordings, and manifest identity mismatches are recorded in `harvest_report.json` and `session_index.json`. The command returns a non-zero exit code for incomplete harvests unless `--allow-partial` is set.
+
+## What harvesting intentionally does not do yet
+
+- No video rendering.
+- No timelapse generation.
+- No split-screen output.
+- No overlays.
+- No shorts.
+- No editor timeline export.
 
 ## Reliable Take Lifecycle
 

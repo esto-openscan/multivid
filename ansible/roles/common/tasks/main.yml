@@ -19,6 +19,18 @@
     system: true
     state: present
 
+- name: Gather existing service facts before service user changes
+  ansible.builtin.service_facts:
+  when: openscan_harvest_ssh_enabled
+
+- name: Stop existing camera node service before changing service user
+  ansible.builtin.systemd:
+    name: openscan-camera-node.service
+    state: stopped
+  when:
+    - openscan_harvest_ssh_enabled
+    - ansible_facts.services.get('openscan-camera-node.service') is not none
+
 - name: Gather local groups
   ansible.builtin.getent:
     database: group
@@ -31,7 +43,72 @@
     append: true
     system: true
     create_home: false
-    home: "{{ openscan_share_root }}"
-    shell: /usr/sbin/nologin
+    home: "{{ openscan_service_home }}"
+    shell: "{{ openscan_harvest_ssh_shell if openscan_harvest_ssh_enabled and openscan_harvest_ssh_user == openscan_service_user else '/usr/sbin/nologin' }}"
     state: present
   register: openscan_service_user_result
+
+- name: Ensure service home exists
+  ansible.builtin.file:
+    path: "{{ openscan_service_home }}"
+    state: directory
+    owner: "{{ openscan_service_user }}"
+    group: "{{ openscan_service_group }}"
+    mode: "0750"
+
+- name: Check controller harvest SSH public key
+  ansible.builtin.stat:
+    path: "{{ openscan_harvest_ssh_public_key_file }}"
+  delegate_to: localhost
+  become: false
+  register: openscan_harvest_ssh_public_key_stat
+  when: openscan_harvest_ssh_enabled
+
+- name: Read controller harvest SSH public key
+  ansible.builtin.set_fact:
+    openscan_harvest_ssh_public_key_from_file: "{{ lookup('ansible.builtin.file', openscan_harvest_ssh_public_key_file) | trim }}"
+  when:
+    - openscan_harvest_ssh_enabled
+    - openscan_harvest_ssh_public_key_stat.stat.exists
+
+- name: Build harvest SSH authorized key list
+  ansible.builtin.set_fact:
+    openscan_harvest_ssh_effective_authorized_keys: >-
+      {{
+        openscan_harvest_ssh_authorized_keys
+        + ([openscan_harvest_ssh_public_key_from_file]
+           if openscan_harvest_ssh_public_key_from_file | default('') | length > 0
+           else [])
+      }}
+  when: openscan_harvest_ssh_enabled
+
+- name: Fail when harvest SSH is enabled without authorized keys
+  ansible.builtin.fail:
+    msg: >-
+      Harvest SSH is enabled but no public key was found. Generate one with
+      ssh-keygen -t ed25519 or set openscan_harvest_ssh_public_key_file /
+      openscan_harvest_ssh_authorized_keys.
+  when:
+    - openscan_harvest_ssh_enabled
+    - openscan_harvest_ssh_effective_authorized_keys | default([]) | length == 0
+
+- name: Ensure harvest SSH directory exists
+  ansible.builtin.file:
+    path: "{{ openscan_harvest_ssh_home }}/.ssh"
+    state: directory
+    owner: "{{ openscan_harvest_ssh_user }}"
+    group: "{{ openscan_service_group }}"
+    mode: "0700"
+  when: openscan_harvest_ssh_enabled
+
+- name: Install harvest SSH authorized keys
+  ansible.builtin.lineinfile:
+    path: "{{ openscan_harvest_ssh_home }}/.ssh/authorized_keys"
+    line: "{{ item }}"
+    state: present
+    create: true
+    owner: "{{ openscan_harvest_ssh_user }}"
+    group: "{{ openscan_service_group }}"
+    mode: "0600"
+  loop: "{{ openscan_harvest_ssh_effective_authorized_keys | default([]) }}"
+  when: openscan_harvest_ssh_enabled

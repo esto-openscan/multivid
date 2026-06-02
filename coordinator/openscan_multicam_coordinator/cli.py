@@ -3,12 +3,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from .client import NodeResult, request_node
 from .config import DEFAULT_NODES_PATH, NodeConfig, load_nodes_config
+from .harvest import DEFAULT_BACKEND, DEFAULT_HARVEST_OUTPUT_ROOT, HarvestOptions, harvest_session
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +60,29 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("calibration-last", help="Show the last calibration result for all nodes")
     subparsers.add_parser("calibration-suggestions", help="Show copyable per-node calibration suggestions")
 
+    harvest_parser = subparsers.add_parser("harvest", help="Collect a recorded session from camera nodes")
+    harvest_parser.add_argument("--session", required=True, help="Session id to harvest")
+    harvest_parser.add_argument(
+        "--output",
+        default=str(DEFAULT_HARVEST_OUTPUT_ROOT),
+        help="Directory where harvested session folders are written",
+    )
+    harvest_parser.add_argument("--backend", default=DEFAULT_BACKEND, choices=[DEFAULT_BACKEND], help="Fetch backend")
+    harvest_parser.add_argument("--dry-run", action="store_true", help="Plan the harvest without copying files")
+    harvest_parser.add_argument("--node", action="append", help="Harvest only this node name; may be repeated")
+    harvest_parser.add_argument("--overwrite", action="store_true", help="Overwrite local files that differ")
+    harvest_parser.add_argument("--clean", action="store_true", help="Delete the local session folder before harvesting")
+    harvest_parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="Return success even if some nodes/files are missing",
+    )
+    harvest_parser.add_argument(
+        "--hash-video",
+        action="store_true",
+        help="Compute sha256 for video files in the generated session index",
+    )
+
     subparsers.add_parser("stop", help="Stop recording on all nodes")
     return parser
 
@@ -72,9 +97,48 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Failed to load nodes config: {exc}", file=sys.stderr)
         return 2
 
+    if args.command == "harvest":
+        return _run_harvest_command(args=args, nodes=nodes)
+
     results = asyncio.run(_run_command(args=args, nodes=nodes))
     _print_results(args.command, results)
     return 0 if all(result.ok for result in results) else 1
+
+
+def _run_harvest_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> int:
+    selected_nodes = _select_harvest_nodes(nodes, args.node)
+    if not selected_nodes:
+        print("No matching nodes to harvest", file=sys.stderr)
+        return 2
+
+    options = HarvestOptions(
+        session_id=args.session,
+        output_root=Path(args.output),
+        backend=args.backend,
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+        clean=args.clean,
+        allow_partial=args.allow_partial,
+        hash_video_files=args.hash_video,
+        timeout=args.timeout,
+    )
+    try:
+        outcome = harvest_session(selected_nodes, options)
+    except Exception as exc:
+        print(f"Harvest failed: {exc}", file=sys.stderr)
+        return 1
+
+    _print_harvest_summary(outcome.harvest_report, dry_run=args.dry_run)
+    if outcome.complete or args.allow_partial:
+        return 0
+    return 1
+
+
+def _select_harvest_nodes(nodes: list[NodeConfig], requested_names: list[str] | None) -> list[NodeConfig]:
+    if not requested_names:
+        return nodes
+    requested = set(requested_names)
+    return [node for node in nodes if node.name in requested]
 
 
 async def _run_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> list[NodeResult]:
@@ -175,6 +239,52 @@ def _print_results(command: str, results: list[NodeResult]) -> None:
     for row in rows:
         print("  ".join(str(row[column]).ljust(widths[column]) for column in columns))
     _print_failure_summary(results)
+
+
+def _print_harvest_summary(report: dict[str, Any], dry_run: bool = False) -> None:
+    mode = "DRY RUN " if dry_run else ""
+    print(
+        f"{mode}harvest session={report.get('session_id')} status={report.get('overall_status')} "
+        f"output={report.get('session_dir')}"
+    )
+    nodes = report.get("nodes") if isinstance(report.get("nodes"), list) else []
+    rows: list[dict[str, str]] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        rows.append(
+            {
+                "node": str(node.get("node_name", "")),
+                "camera": str(node.get("camera_id", "")),
+                "status": str(node.get("status", "")),
+                "copied": str(node.get("files_copied", 0)),
+                "unchanged": str(node.get("files_skipped_unchanged", 0)),
+                "conflicts": str(node.get("files_conflicted", 0)),
+                "missing": str(len(node.get("missing_files", []))),
+                "errors": str(len(node.get("errors", []))),
+            }
+        )
+    if rows:
+        columns = ["node", "camera", "status", "copied", "unchanged", "conflicts", "missing", "errors"]
+        widths = {column: max(len(column), *(len(row[column]) for row in rows)) for column in columns}
+        print("  ".join(column.upper().ljust(widths[column]) for column in columns))
+        print("  ".join("-" * widths[column] for column in columns))
+        for row in rows:
+            print("  ".join(row[column].ljust(widths[column]) for column in columns))
+
+    warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    if errors:
+        print("Errors:")
+        for error in errors:
+            print(f"  - {error}")
+    if not dry_run:
+        print(f"Index: {report.get('session_dir')}/session_index.json")
+        print(f"Report: {report.get('session_dir')}/harvest_report.json")
 
 
 def _print_calibration_results(command: str, results: list[NodeResult]) -> None:

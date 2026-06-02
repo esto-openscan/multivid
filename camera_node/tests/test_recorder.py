@@ -111,6 +111,33 @@ class RecorderTests(unittest.TestCase):
         self.assertTrue(prepared_state["valid"])
         self.assertEqual(prepared_state["planned_applied_controls"]["shutter_us"], 20000)
 
+    def test_session_summary_lists_prepared_state_takes_and_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            recorder = _new_recorder(Path(temp_dir))
+            process = FakeProcess(pid=11111)
+            with (
+                patch("openscan_camera_node.recorder.subprocess.Popen", return_value=process),
+                patch("openscan_camera_node.recorder.os.killpg"),
+            ):
+                recorder.start("session-1", "video")
+                recorder.stop()
+
+            take_dir = Path(temp_dir) / "sessions" / "session-1" / "cam-a" / "take_001"
+            (take_dir / "recording.h264").write_bytes(b"video")
+            summary = recorder.session_summary("session-1")
+
+        self.assertTrue(summary["exists"])
+        self.assertTrue(summary["prepared_state"]["exists"])
+        self.assertEqual(summary["take_count"], 1)
+        take = summary["takes"][0]
+        self.assertEqual(take["take_id"], "take_001")
+        self.assertEqual(take["recording_file_name"], "recording.h264")
+        files_by_name = {file_info["name"]: file_info for file_info in take["files"]}
+        self.assertEqual(files_by_name["manifest.json"]["kind"], "manifest")
+        self.assertEqual(files_by_name["recording.h264"]["kind"], "recording")
+        self.assertEqual(files_by_name["recording.h264"]["size"], 5)
+        self.assertEqual(take["manifest_summary"]["session_id"], "session-1")
+
     def test_prepare_links_calibration_suggestions_and_start_applies_only_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             recorder = _new_calibration_recorder(Path(temp_dir))

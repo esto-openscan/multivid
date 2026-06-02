@@ -93,6 +93,31 @@ def create_app(config_path: str | Path | None = None, profiles_path: str | Path 
     def list_profiles() -> dict[str, Any]:
         return {"profiles_scope": "resolved_for_node", "profiles": recorder.profiles()}
 
+    @app.get("/sessions")
+    def list_sessions() -> dict[str, Any]:
+        return recorder.list_sessions()
+
+    @app.get("/sessions/{session_id}")
+    def session_summary(session_id: str) -> dict[str, Any]:
+        try:
+            return recorder.session_summary(session_id)
+        except InvalidSessionIdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/sessions/{session_id}/takes")
+    def session_takes(session_id: str) -> dict[str, Any]:
+        try:
+            return recorder.session_takes(session_id)
+        except InvalidSessionIdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/sessions/{session_id}/manifest-summary")
+    def session_manifest_summary(session_id: str) -> dict[str, Any]:
+        try:
+            return recorder.session_manifest_summary(session_id)
+        except InvalidSessionIdError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.post("/recordings/start", status_code=202)
     def start_recording(request: StartRecordingRequest) -> dict[str, Any]:
         try:

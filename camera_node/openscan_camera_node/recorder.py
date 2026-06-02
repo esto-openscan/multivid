@@ -472,6 +472,99 @@ class RpicamVidRecorder:
     def profiles(self) -> dict[str, dict[str, Any]]:
         return self._profiles.as_dict()
 
+    def list_sessions(self) -> dict[str, Any]:
+        with self._lock:
+            self._finalize_if_process_exited_locked()
+            sessions: list[dict[str, Any]] = []
+            root = self._config.output_root
+            if root.exists():
+                for child in sorted(root.iterdir()):
+                    if not child.is_dir():
+                        continue
+                    camera_dir = child / self._config.camera_id
+                    sessions.append(
+                        {
+                            "session_id": child.name,
+                            "camera_session_exists": camera_dir.exists(),
+                            "camera_session_path": str(camera_dir),
+                        }
+                    )
+            return {
+                "camera_id": self._config.camera_id,
+                "hostname": self._hostname,
+                "output_root": str(root),
+                "sessions": sessions,
+            }
+
+    def session_summary(self, session_id: str) -> dict[str, Any]:
+        with self._lock:
+            self._finalize_if_process_exited_locked()
+            self._validate_session_id(session_id)
+            camera_dir = self._camera_session_dir(session_id)
+            exists = camera_dir.exists()
+            prepared_path = self._prepared_state_path(session_id)
+            takes = self._session_takes_summary(camera_dir) if exists else []
+            return {
+                "camera_id": self._config.camera_id,
+                "hostname": self._hostname,
+                "session_id": session_id,
+                "output_root": str(self._config.output_root),
+                "camera_session_path": str(camera_dir),
+                "exists": exists,
+                "prepared_state": _file_summary(prepared_path, camera_dir) if exists else {"exists": False},
+                "takes": takes,
+                "take_count": len(takes),
+            }
+
+    def session_takes(self, session_id: str) -> dict[str, Any]:
+        summary = self.session_summary(session_id)
+        return {
+            "camera_id": summary["camera_id"],
+            "hostname": summary["hostname"],
+            "session_id": session_id,
+            "exists": summary["exists"],
+            "takes": summary["takes"],
+            "take_count": summary["take_count"],
+        }
+
+    def session_manifest_summary(self, session_id: str) -> dict[str, Any]:
+        summary = self.session_summary(session_id)
+        manifests: list[dict[str, Any]] = []
+        for take in summary["takes"]:
+            manifest = take.get("manifest_summary")
+            if isinstance(manifest, dict):
+                manifests.append(manifest)
+        return {
+            "camera_id": summary["camera_id"],
+            "hostname": summary["hostname"],
+            "session_id": session_id,
+            "exists": summary["exists"],
+            "manifests": manifests,
+        }
+
+    def _session_takes_summary(self, camera_dir: Path) -> list[dict[str, Any]]:
+        takes: list[dict[str, Any]] = []
+        for child in sorted(camera_dir.iterdir()):
+            if not child.is_dir() or child.name == "calibration":
+                continue
+            manifest_path = child / "manifest.json"
+            manifest = _read_json_mapping(manifest_path)
+            recording_name = None
+            if manifest is not None and isinstance(manifest.get("output_file_name"), str):
+                recording_name = manifest["output_file_name"]
+            files = _take_file_summaries(child, camera_dir, recording_name)
+            takes.append(
+                {
+                    "take_id": child.name,
+                    "path": str(child),
+                    "relative_path": str(child.relative_to(camera_dir)),
+                    "manifest_summary": _manifest_harvest_summary(manifest),
+                    "recording_file_name": recording_name,
+                    "files": files,
+                }
+            )
+        return takes
+
     def _run_calibration_unlocked(
         self,
         session_id: str,
@@ -1333,6 +1426,91 @@ def _recording_summary_from_manifest(manifest: dict[str, Any]) -> dict[str, Any]
         "unsupported_controls": manifest.get("unsupported_controls"),
         "warnings": manifest.get("warnings", []),
     }
+
+
+def _read_json_mapping(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _file_summary(path: Path, base_dir: Path) -> dict[str, Any]:
+    exists = path.exists()
+    summary: dict[str, Any] = {
+        "name": path.name,
+        "path": str(path),
+        "relative_path": str(path.relative_to(base_dir)) if exists else path.name,
+        "exists": exists,
+    }
+    if exists and path.is_file():
+        stat = path.stat()
+        summary["size"] = stat.st_size
+        summary["mtime"] = stat.st_mtime
+    return summary
+
+
+def _take_file_summaries(take_dir: Path, camera_dir: Path, recording_name: str | None) -> list[dict[str, Any]]:
+    files: list[dict[str, Any]] = []
+    expected_names = ["manifest.json"]
+    if recording_name:
+        expected_names.append(recording_name)
+    expected_names.append("rpicam-vid.stderr.log")
+
+    seen: set[str] = set()
+    for name in expected_names:
+        seen.add(name)
+        summary = _file_summary(take_dir / name, camera_dir)
+        summary["kind"] = _file_kind(name, recording_name)
+        files.append(summary)
+
+    for child in sorted(take_dir.iterdir()):
+        if not child.is_file() or child.name in seen:
+            continue
+        summary = _file_summary(child, camera_dir)
+        summary["kind"] = _file_kind(child.name, recording_name)
+        files.append(summary)
+    return files
+
+
+def _file_kind(name: str, recording_name: str | None) -> str:
+    if name == "manifest.json":
+        return "manifest"
+    if name == "rpicam-vid.stderr.log":
+        return "stderr_log"
+    if recording_name and name == recording_name:
+        return "recording"
+    return "extra"
+
+
+def _manifest_harvest_summary(manifest: dict[str, Any] | None) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+    fields = (
+        "schema_version",
+        "status",
+        "session_id",
+        "take_id",
+        "camera_id",
+        "hostname",
+        "service_version",
+        "backend",
+        "profile",
+        "recording_start_time",
+        "recording_stop_time",
+        "pre_roll_seconds",
+        "usable_start_offset_seconds",
+        "usable_start_time",
+        "output_file_name",
+        "exit_code",
+        "warnings",
+        "errors",
+    )
+    return {field: manifest.get(field) for field in fields if field in manifest}
 
 
 def _control_status(

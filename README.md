@@ -551,10 +551,15 @@ harvested_sessions/<session_id>/derivatives/review/
   multicam_stringout.mp4
   multicam_stringout_report.json
   ffmpeg_commands.txt
+  takes/
+    take_001_multicam_stringout.mp4
+    take_002_multicam_stringout.mp4
   logs/
 ```
 
-Default render settings are 1920x1080, 30 fps, 5x speed, H.264 via `libx264`, `yuv420p`, and no audio. The MVP supports 1, 2, 3, and 4 camera grids. If camera label or slate text rendering fails because `ffmpeg drawtext` is unavailable, the renderer retries without that text and records a warning.
+By default the command creates both one full-session stringout and one review file per take. The per-take files are useful for notes such as "use the side camera around take_003 02:15". Pass `--no-per-take` to render only the full-session stringout.
+
+Default render settings are 1920x1080, 30 fps, 5x speed, H.264 via `libx264`, `yuv420p`, and no audio. The MVP supports 1, 2, 3, and 4 camera grids. Three cameras render as a 2x2 grid with one empty black tile. Each grid has camera labels plus a centered take/time overlay showing usable source-take time after pre-roll. If camera label, timecode, or slate text rendering fails because `ffmpeg drawtext` is unavailable, the renderer retries without that text and records a warning.
 
 Example workflow:
 
@@ -589,11 +594,12 @@ Useful options:
 multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --dry-run
 multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --take take_001
 multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --include-cameras front,side,top
+multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --no-per-take
 multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --realtime
 multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --overwrite
 ```
 
-The command does not overwrite an existing output unless `--overwrite` is passed. `--dry-run` parses the session index, resolves takes/cameras/files, prints the planned output, and does not call `ffmpeg` or write video/report files.
+With `--take take_001`, the default output is only the matching per-take file under `derivatives/review/takes/`. Add `--no-per-take` if you want the older single-output behavior for a selected take. The command does not overwrite existing full-session or per-take outputs unless `--overwrite` is passed. `--dry-run` parses the session index, resolves takes/cameras/files, prints the planned output, and does not call `ffmpeg` or write video/report files.
 
 ### What this milestone intentionally does not do
 

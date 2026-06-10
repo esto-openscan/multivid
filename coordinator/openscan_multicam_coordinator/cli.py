@@ -133,6 +133,7 @@ def build_parser() -> argparse.ArgumentParser:
     stringout_parser.add_argument("--dry-run", action="store_true", help="Plan the render without calling ffmpeg")
     stringout_parser.add_argument("--no-slate", action="store_true", help="Do not render take slate sections")
     stringout_parser.add_argument("--no-labels", action="store_true", help="Do not burn camera labels into the grid")
+    stringout_parser.add_argument("--no-per-take", action="store_true", help="Do not render individual per-take stringouts")
     stringout_parser.add_argument("--realtime", action="store_true", help="Shortcut for --speed 1")
 
     dashboard_parser = subparsers.add_parser("dashboard", help="Run the local browser operator dashboard")
@@ -213,6 +214,7 @@ def _run_stringout_command(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         no_slate=args.no_slate,
         no_labels=args.no_labels,
+        no_per_take=args.no_per_take,
     )
     try:
         report = derive_stringout(options)
@@ -487,6 +489,9 @@ def _print_stringout_summary(report: dict[str, Any]) -> None:
     if not report.get("dry_run"):
         print(f"Report: {report.get('report_file_path')}")
         print(f"Commands: {report.get('ffmpeg_commands_file_path')}")
+    per_take_paths = report.get("per_take_output_file_paths")
+    if isinstance(per_take_paths, dict) and per_take_paths:
+        print(f"Per-take outputs: {len(per_take_paths)}")
 
 
 def _format_seconds(value: Any) -> str:

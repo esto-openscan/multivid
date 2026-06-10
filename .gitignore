@@ -13,3 +13,6 @@ build/
 ansible/inventory.yml
 ansible/host_vars/*.yml
 !ansible/host_vars/*.example.yml
+
+sessions/
+harvested_sessions/

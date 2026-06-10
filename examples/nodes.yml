@@ -20,3 +20,14 @@ nodes:
     ssh_user: openscan
     remote_output_root: /srv/openscan-camera/sessions
     local_alias: top
+dashboard:
+  positioning:
+    width: 640
+    height: 360
+    fps: 5
+    jpeg_quality: 75
+    overlays:
+      - camera_label
+      - crosshair
+      - shorts_safe_area
+  status_refresh_seconds: 3

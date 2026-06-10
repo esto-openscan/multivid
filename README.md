@@ -12,7 +12,7 @@ The shape is deliberately simple:
 - A small coordinator CLI sends concurrent HTTP requests to all configured nodes.
 - The coordinator can harvest a completed distributed session into one local archive.
 
-There is no Docker, no Swarm, no web UI, and no video postprocessing in this MVP.
+There is no Docker, no Swarm, no final OpenScan3 web UI, and no video postprocessing in this MVP.
 
 ## Repository Layout
 
@@ -324,6 +324,101 @@ For safety, the MVP rejects reference still capture while recording, calibrating
 9. Stop recording.
 10. Harvest the session.
 
+## Minimal Operator Dashboard
+
+Milestone 4.6 adds a small host-side browser dashboard for local capture operation. It runs on the coordinator/laptop, not on each camera node. The browser calls the dashboard backend, and the dashboard backend calls the existing camera-node APIs concurrently.
+
+Start it from the repository environment where the coordinator package is installed:
+
+```bash
+multicam dashboard --config examples/nodes.yml --port 8090
+```
+
+Then open:
+
+```text
+http://localhost:8090
+```
+
+The command prints the dashboard URL, loaded node count, config path, and a warning that this is a local/trusted-network MVP with no authentication.
+
+The dashboard is optimized for local laptop/desktop operation at normal browser zoom. It is intended to keep two or three camera previews visible and operable without zooming out on typical 1366px, 1440px, and 1920px wide screens.
+
+The dashboard shows all configured camera nodes on one page and can:
+
+- refresh node status while tolerating offline nodes
+- start and stop low-resolution positioning preview
+- show MJPEG preview streams or periodically refreshed snapshots
+- capture high-resolution reference stills across nodes
+- run calibration across nodes for inspection
+- start and stop recordings across nodes
+- show per-node success, rejection, offline, warning, and error messages
+
+Example dashboard workflow:
+
+1. Start dashboard: `multicam dashboard --config examples/nodes.yml --port 8090`
+2. Open `http://localhost:8090`.
+3. Enter `session_id`.
+4. Start positioning.
+5. Align cameras using the preview cards.
+6. Stop positioning.
+7. Capture reference stills.
+8. Run calibration if needed.
+9. Start recording.
+10. Stop recording.
+11. Harvest from the CLI for now.
+
+Dashboard defaults can be added to `examples/nodes.yml`:
+
+```yaml
+dashboard:
+  positioning:
+    width: 640
+    height: 360
+    fps: 5
+    jpeg_quality: 75
+    overlays:
+      - camera_label
+      - crosshair
+      - shorts_safe_area
+  status_refresh_seconds: 3
+```
+
+The dashboard respects node-side state validation. It does not force-stop positioning before recording, does not apply calibration suggestions as part of calibration capture, and does not hide partial failures. Recording profiles still decide whether linked calibration suggestions are applied to `rpicam-vid`.
+
+### What this dashboard intentionally does not do yet
+
+- No clip factory.
+- No render/export.
+- No ffmpeg rendering.
+- No Kdenlive integration.
+- No timeline.
+- No session gallery.
+- No user authentication.
+- No cloud access.
+- No final OpenScan3 UI integration.
+
+### Manual dashboard verification checklist
+
+- Start dashboard with two or three configured nodes.
+- Open the dashboard at 100% browser zoom.
+- Confirm top controls use less vertical space than the earlier MVP layout.
+- Confirm all node cards appear.
+- Confirm three camera cards fit in one row on a 1920px wide screen.
+- Confirm the layout remains usable around 1440x900 and 1366px wide.
+- Start positioning from the dashboard.
+- Confirm streams or snapshots appear and previews remain visible without zooming out.
+- Stop positioning and confirm stopped-preview placeholders do not dominate the cards.
+- Confirm controls remain usable after wrapping.
+- Confirm operation results are readable.
+- Stop positioning.
+- Capture reference stills.
+- Run calibration.
+- Start recording.
+- Stop recording.
+- Confirm per-node errors are visible if one node is offline.
+- Confirm all existing dashboard buttons still work.
+
 ## Harvesting a session
 
 Recording happens on the camera nodes. Harvesting is the next step: the coordinator collects each node's session files into one central folder so later rendering/editing tools have a reproducible local archive to consume.
@@ -518,7 +613,7 @@ camera_control_policy:
   prepare_warmup_seconds: 0
 ```
 
-For multicam consistency, AE/AWB should ideally warm up and then lock. With the current `rpicam-vid` subprocess backend, this is only a partial foundation: calibration can capture metadata when available and prepare can link suggestions, but actual locks are applied only when explicitly requested and only for values observed in metadata. The metadata is honest about gaps with warnings.
+For multicam consistency, AE/AWB should ideally warm up and then lock. With the current `rpicam-vid` subprocess backend, this is only a partial foundation: calibration can capture metadata when available, prepare can link suggestions, and profiles such as `video_1080p25_calibrated_suggest` can apply available suggestions during recording. Only values observed in metadata are applied. The metadata is honest about gaps with warnings.
 
 Avoid continuous autofocus for final takes unless it is explicitly needed. The `video_1080p50_experimental_locked` profile is for testing only.
 
@@ -542,8 +637,8 @@ Recommended workflow:
 2. Place a gray card or representative scene in view.
 3. Run `multicam calibrate`.
 4. Review suggested values and warnings.
-5. Copy good values into per-node overrides.
-6. Use a locked profile for real takes.
+5. For direct calibrated capture, record with `video_1080p25_calibrated_suggest`.
+6. For a conservative permanent setup, copy good values into per-node overrides and use a locked profile for real takes.
 
 Example override snippet:
 
@@ -557,9 +652,9 @@ profile_overrides:
       lens_position: 1.8
 ```
 
-Suggestions are not automatically written back into `profiles.yaml` or Ansible host vars. `multicam calibration-suggestions` prints copyable snippets, but you decide what to keep.
+Suggestions are not automatically written back into `profiles.yaml` or Ansible host vars. `multicam calibration-suggestions` prints copyable snippets, but you decide what to keep. The `video_1080p25_calibrated_suggest` profile is the no-host-edit path: it links available calibration suggestions for the session and applies them during recording.
 
-Experimental profiles can link suggestions during prepare:
+Profiles can link and apply suggestions during prepare/recording:
 
 ```yaml
 camera_control_policy:
@@ -567,15 +662,17 @@ camera_control_policy:
   awb_mode: auto_then_lock
   focus_mode: auto_then_lock
   use_calibration_suggestions: true
-  apply_suggestions_to_recording: false
+  apply_suggestions_to_recording: true
 ```
 
-If suggestions are available and `reuse_prepared_controls` is true, `prepared_state.json` records the calibration id, manifest path, suggestion path, and a snapshot of the suggested controls. Actual recording still does not apply those values unless you explicitly allow it, for example:
+If suggestions are available and `reuse_prepared_controls` is true, `prepared_state.json` records the calibration id, manifest path, suggestion path, and a snapshot of the suggested controls. `video_1080p25_calibrated_suggest` applies those available suggestions automatically because its profile policy sets `apply_suggestions_to_recording: true`:
 
 ```bash
 multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto --apply-to-session
-multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25_auto_then_lock_experimental --apply-calibration-suggestions
+multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25_calibrated_suggest
 ```
+
+The explicit `--apply-calibration-suggestions` start flag remains available for testing other profiles that link suggestions but do not apply them by default.
 
 Each take manifest records whether suggestions were linked and whether they were actually applied. `auto_then_lock` remains experimental until a Picamera2 backend can read and apply AE/AWB/AF controls reliably.
 
@@ -600,8 +697,8 @@ The resolved profile snapshot is stored in each `manifest.json`. `requested_cont
 ## What this MVP intentionally does not do yet
 
 - No Docker or Docker Swarm.
-- No web UI.
-- No automatic harvesting from camera nodes.
+- No final OpenScan3 web UI.
+- No automatic dashboard-driven harvesting from camera nodes.
 - No ffmpeg postprocessing or rendering.
 - No video editing workflow.
 - No complicated synchronization.

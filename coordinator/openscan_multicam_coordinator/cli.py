@@ -114,6 +114,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute sha256 for video files in the generated session index",
     )
 
+    dashboard_parser = subparsers.add_parser("dashboard", help="Run the local browser operator dashboard")
+    dashboard_parser.add_argument("--config", help="Path to nodes.yml; defaults to --nodes")
+    dashboard_parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host")
+    dashboard_parser.add_argument("--port", type=int, default=8090, help="Dashboard bind port")
+    dashboard_parser.add_argument("--open-browser", action="store_true", help="Open the dashboard URL in a browser")
+
     subparsers.add_parser("stop", help="Stop recording on all nodes")
     return parser
 
@@ -122,11 +128,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    nodes_path = getattr(args, "config", None) or args.nodes
     try:
-        nodes = load_nodes_config(args.nodes)
+        nodes = load_nodes_config(nodes_path)
     except Exception as exc:
         print(f"Failed to load nodes config: {exc}", file=sys.stderr)
         return 2
+
+    if args.command == "dashboard":
+        return _run_dashboard_command(args=args, nodes=nodes, config_path=nodes_path)
 
     if args.command == "harvest":
         return _run_harvest_command(args=args, nodes=nodes)
@@ -163,6 +173,24 @@ def _run_harvest_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> i
     if outcome.complete or args.allow_partial:
         return 0
     return 1
+
+
+def _run_dashboard_command(args: argparse.Namespace, nodes: list[NodeConfig], config_path: str | Path) -> int:
+    url = f"http://{args.host}:{args.port}"
+    print(f"Dashboard URL: {url}")
+    print(f"Loaded nodes: {len(nodes)}")
+    print(f"Config path: {config_path}")
+    print("Warning: this dashboard is a local/trusted-network MVP with no authentication.")
+    try:
+        from .dashboard.app import serve
+
+        serve(config_path=config_path, host=args.host, port=args.port, open_browser=args.open_browser)
+    except KeyboardInterrupt:
+        return 0
+    except Exception as exc:
+        print(f"Dashboard failed: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _select_harvest_nodes(nodes: list[NodeConfig], requested_names: list[str] | None) -> list[NodeConfig]:

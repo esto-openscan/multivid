@@ -72,7 +72,7 @@ profiles:
       - --inline
 
   video_1080p25_calibrated_suggest:
-    description: Experimental 1080p25 profile that records auto controls but links calibration suggestions during prepare
+    description: 1080p25 profile that applies available calibration suggestions during recording
     output_extension: h264
     recording:
       width: 1920
@@ -103,7 +103,7 @@ profiles:
       refocus_on_each_take: false
       prepare_warmup_seconds: 0
       use_calibration_suggestions: true
-      apply_suggestions_to_recording: false
+      apply_suggestions_to_recording: true
     rpicam_vid_extra_args:
       - --inline
 

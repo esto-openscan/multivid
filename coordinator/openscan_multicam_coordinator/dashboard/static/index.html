@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenScan Multicam Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">OpenScan Multicam</p>
+      <h1>Operator Dashboard</h1>
+      <p class="subhead">Local control for positioning, stills, calibration, and recording.</p>
+    </div>
+    <div class="runtime">
+      <div><span id="node-count">0</span> nodes</div>
+      <div id="config-path">config: -</div>
+      <div id="last-refresh">not refreshed</div>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel controls" aria-label="Operation controls">
+      <div class="control-fields">
+        <div class="field">
+          <label for="session-id">Session ID</label>
+          <input id="session-id" placeholder="benchy_scan_001" autocomplete="off">
+        </div>
+        <div class="field">
+          <label for="take-id">Take ID <span>optional</span></label>
+          <input id="take-id" placeholder="take_001" autocomplete="off">
+        </div>
+        <div class="field profile-field">
+          <label for="profile-select">Profile</label>
+          <select id="profile-select"></select>
+          <input id="profile-manual" placeholder="manual profile name" autocomplete="off">
+          <small id="profile-warning"></small>
+        </div>
+        <div class="field compact-field">
+          <label for="calibration-duration">Calibration seconds</label>
+          <input id="calibration-duration" type="number" min="0.1" step="0.1" placeholder="5">
+        </div>
+        <div class="field">
+          <label for="still-label">Reference still label</label>
+          <input id="still-label" placeholder="alignment_001" autocomplete="off">
+        </div>
+      </div>
+      <div class="button-groups" aria-label="Dashboard actions">
+        <div class="button-group" aria-label="Status actions">
+          <span>Status</span>
+          <button id="refresh-status" type="button" aria-label="Refresh status">Refresh</button>
+        </div>
+        <div class="button-group positioning-group" aria-label="Positioning actions">
+          <span>Positioning</span>
+          <button id="start-positioning" type="button" aria-label="Start positioning">Start</button>
+          <button id="stop-positioning" type="button" aria-label="Stop positioning">Stop</button>
+          <fieldset class="overlays">
+            <legend>Options</legend>
+            <label><input type="checkbox" value="camera_label" checked> label</label>
+            <label><input type="checkbox" value="crosshair" checked> crosshair</label>
+            <label><input type="checkbox" value="grid"> grid</label>
+            <label><input type="checkbox" value="shorts_safe_area" checked> safe area</label>
+          </fieldset>
+        </div>
+        <div class="button-group" aria-label="Reference still actions">
+          <span>Reference Stills</span>
+          <button id="capture-stills" type="button" aria-label="Capture reference stills">Capture</button>
+        </div>
+        <div class="button-group" aria-label="Calibration actions">
+          <span>Calibration</span>
+          <button id="run-calibration" type="button" aria-label="Run calibration">Run</button>
+        </div>
+        <div class="button-group recording-group" aria-label="Recording actions">
+          <span>Recording</span>
+          <button id="start-recording" type="button" class="danger" aria-label="Start recording">Start</button>
+          <button id="stop-recording" type="button" aria-label="Stop recording">Stop</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel feedback" aria-live="polite">
+      <details id="operation-details">
+        <summary>
+          <span class="feedback-title">Last operation</span>
+          <span id="operation-summary">No operation yet.</span>
+        </summary>
+        <ul id="operation-results"></ul>
+      </details>
+    </section>
+
+    <section id="node-grid" class="node-grid" aria-label="Camera nodes"></section>
+  </main>
+
+  <template id="node-card-template">
+    <article class="node-card">
+      <div class="card-head">
+        <div>
+          <h2 class="node-title"></h2>
+          <p class="node-meta"></p>
+        </div>
+        <span class="state-pill"></span>
+      </div>
+      <div class="preview-wrap">
+        <img class="preview" alt="Positioning preview">
+        <div class="preview-empty">Preview stopped</div>
+      </div>
+      <dl class="facts"></dl>
+      <div class="links"></div>
+      <div class="detail error"></div>
+      <details class="node-details">
+        <summary>More node details</summary>
+        <div class="detail output"></div>
+        <div class="detail last-still"></div>
+        <div class="detail last-calibration"></div>
+        <div class="detail warnings"></div>
+      </details>
+    </article>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

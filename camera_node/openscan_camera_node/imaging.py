@@ -232,12 +232,17 @@ def _add_value_arg(command: list[str], option: str, value: Any) -> None:
 
 
 def _draw_grid(draw: Any, width: int, height: int) -> None:
-    color = (255, 255, 255, 115)
-    shadow = (0, 0, 0, 110)
-    for x in (width / 3, 2 * width / 3):
-        _line(draw, (x, 0, x, height), color, shadow)
-    for y in (height / 3, 2 * height / 3):
-        _line(draw, (0, y, width, y), color, shadow)
+    minor_color = (255, 255, 255, 135)
+    major_color = (255, 245, 90, 190)
+    shadow = (0, 0, 0, 150)
+    for index in range(1, 6):
+        is_third = index in {2, 4}
+        color = major_color if is_third else minor_color
+        line_width = 2 if is_third else 1
+        x = width * index / 6
+        y = height * index / 6
+        _line(draw, (x, 0, x, height), color, shadow, width=line_width)
+        _line(draw, (0, y, width, y), color, shadow, width=line_width)
 
 
 def _draw_crosshair(draw: Any, width: int, height: int) -> None:

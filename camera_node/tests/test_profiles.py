@@ -12,6 +12,17 @@ from openscan_camera_node.profiles import load_recording_profiles
 
 
 class RecordingProfileTests(unittest.TestCase):
+    def test_example_calibrated_suggest_profile_applies_suggestions(self) -> None:
+        profiles_path = Path(__file__).resolve().parents[2] / "examples" / "profiles.yml"
+
+        profiles = load_recording_profiles(profiles_path)
+        profile = profiles.get("video_1080p25_calibrated_suggest")
+
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertTrue(profile.camera_control_policy.use_calibration_suggestions)
+        self.assertTrue(profile.camera_control_policy.apply_suggestions_to_recording)
+
     def test_camera_control_policy_defaults_and_warnings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "profiles.yml"

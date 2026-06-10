@@ -2240,11 +2240,11 @@ def _backend_policy_warnings(policy: CameraControlPolicy, refocus: bool) -> list
     warnings: list[str] = []
     if policy.exposure_mode == "auto_then_lock" or policy.awb_mode == "auto_then_lock":
         warnings.append(
-            "AE/AWB auto_then_lock is experimental on rpicam-vid; lock values require calibration suggestions and explicit apply"
+            "AE/AWB auto_then_lock is experimental on rpicam-vid; lock values require calibration suggestions and apply_suggestions_to_recording"
         )
     if policy.focus_mode == "auto_then_lock" or refocus:
         warnings.append(
-            "AF auto_then_lock/refocus is experimental on rpicam-vid; focus values require metadata support and explicit apply"
+            "AF auto_then_lock/refocus is experimental on rpicam-vid; focus values require metadata support and apply_suggestions_to_recording"
         )
     if policy.focus_mode == "continuous":
         warnings.append("continuous autofocus requested; avoid for final takes unless intentionally configured")

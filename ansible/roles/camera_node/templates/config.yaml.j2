@@ -5,6 +5,9 @@ output_root: "{{ openscan_sessions_root }}"
 camera_control_policy:
   use_calibration_suggestions: {{ openscan_camera_control_policy_use_calibration_suggestions | default(false) | bool | lower }}
   apply_suggestions_to_recording: {{ openscan_camera_control_policy_apply_suggestions_to_recording | default(false) | bool | lower }}
+camera_transform:
+  hflip: {{ (openscan_camera_transform | default({})).hflip | default(false) | bool | lower }}
+  vflip: {{ (openscan_camera_transform | default({})).vflip | default(false) | bool | lower }}
 positioning:
   width: {{ openscan_positioning_width | default(640) }}
   height: {{ openscan_positioning_height | default(360) }}

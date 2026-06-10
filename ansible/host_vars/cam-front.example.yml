@@ -1,5 +1,8 @@
 camera_id: front
 openscan_camera_node_listen_port: 8080
+openscan_camera_transform:
+  hflip: false
+  vflip: false
 openscan_camera_node_profile_overrides:
   video_1080p25_locked:
     camera_controls:

@@ -344,6 +344,8 @@ The command prints the dashboard URL, loaded node count, config path, and a warn
 
 The dashboard is optimized for local laptop/desktop operation at normal browser zoom. It is intended to keep two or three camera previews visible and operable without zooming out on typical 1366px, 1440px, and 1920px wide screens.
 
+Preview snapshots and MJPEG streams are proxied through the dashboard backend. Browser clients such as tablets only need to reach the coordinator dashboard URL; they do not need to resolve camera-node hostnames directly.
+
 The dashboard shows all configured camera nodes on one page and can:
 
 - refresh node status while tolerating offline nodes
@@ -536,6 +538,74 @@ Harvesting is idempotent. If a local file already exists and the remote size and
 - No shorts.
 - No editor timeline export.
 
+## Generating a multicam review stringout
+
+The multicam review stringout is the first derived video artifact after harvesting. It is a review file, not a finished marketing edit. Use it to quickly check whether cameras recorded, framing/focus/exposure are acceptable, angles are useful, and takes are worth editing.
+
+The stringout generator reads a harvested session folder, uses `session_index.json` to discover takes and camera recordings, trims pre-roll when metadata is available, renders each take as a simple multicam grid, adds short take slates, concatenates the takes, and writes a debugging report with warnings and ffmpeg commands.
+
+Default output:
+
+```text
+harvested_sessions/<session_id>/derivatives/review/
+  multicam_stringout.mp4
+  multicam_stringout_report.json
+  ffmpeg_commands.txt
+  logs/
+```
+
+Default render settings are 1920x1080, 30 fps, 5x speed, H.264 via `libx264`, `yuv420p`, and no audio. The MVP supports 1, 2, 3, and 4 camera grids. If camera label or slate text rendering fails because `ffmpeg drawtext` is unavailable, the renderer retries without that text and records a warning.
+
+Example workflow:
+
+1. Start dashboard:
+
+   ```bash
+   multicam dashboard --config examples/nodes.yml --port 8090
+   ```
+
+2. Position cameras and record one or more takes.
+3. Harvest:
+
+   ```bash
+   multicam harvest --session benchy_scan_001 --output ./harvested_sessions
+   ```
+
+4. Generate stringout:
+
+   ```bash
+   multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --speed 5
+   ```
+
+5. Open:
+
+   ```text
+   ./harvested_sessions/benchy_scan_001/derivatives/review/multicam_stringout.mp4
+   ```
+
+Useful options:
+
+```bash
+multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --dry-run
+multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --take take_001
+multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --include-cameras front,side,top
+multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --realtime
+multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --overwrite
+```
+
+The command does not overwrite an existing output unless `--overwrite` is passed. `--dry-run` parses the session index, resolves takes/cameras/files, prints the planned output, and does not call `ffmpeg` or write video/report files.
+
+### What this milestone intentionally does not do
+
+- No final edit.
+- No Shorts.
+- No Kdenlive project.
+- No clip selection.
+- No automatic best-angle decisions.
+- No fancy graphics.
+- No full recipe system.
+- No dashboard integration.
+
 ## Reliable Take Lifecycle
 
 The camera-node service tracks a simple lifecycle:
@@ -681,6 +751,14 @@ Each take manifest records whether suggestions were linked and whether they were
 Auto profiles are useful for quick tests. Locked profiles are recommended for multicam consistency because each node receives explicit `rpicam-vid` arguments for the controls configured in the resolved profile.
 
 For consistent colors across cameras, set manual `awbgains`. For consistent motion blur, set fixed `shutter_us`. For consistent brightness and noise, set fixed `gain`. For fixed camera setups, avoid continuous autofocus and use `autofocus_mode: manual` with a per-node `lens_position`.
+
+For physically mirrored or upside-down camera mounts, set node-level `camera_transform`. These flags are applied consistently to recordings, calibration captures, positioning previews, and reference stills, independent of the selected recording profile:
+
+```yaml
+camera_transform:
+  hflip: true
+  vflip: false
+```
 
 Per-node overrides are expected because camera modules and physical angles differ. Ansible renders these into `/etc/openscan-camera-node/config.yaml`:
 

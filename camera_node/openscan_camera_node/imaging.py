@@ -38,6 +38,7 @@ class RpicamJpegBackend:
         height: int | None,
         quality: int,
         camera_controls: dict[str, Any] | None = None,
+        camera_transform: dict[str, Any] | None = None,
         overlay_settings: dict[str, Any] | None = None,
         timeout_ms: int = 350,
     ) -> JpegCaptureResult:
@@ -49,6 +50,7 @@ class RpicamJpegBackend:
                 height=height,
                 quality=quality,
                 camera_controls=camera_controls,
+                camera_transform=camera_transform,
                 timeout_ms=timeout_ms,
             )
             image_bytes = output_file.read_bytes()
@@ -79,6 +81,7 @@ class RpicamJpegBackend:
         height: int | None,
         quality: int,
         camera_controls: dict[str, Any] | None = None,
+        camera_transform: dict[str, Any] | None = None,
         timeout_ms: int = 1000,
     ) -> JpegCaptureResult:
         backend = resolve_jpeg_backend()
@@ -89,6 +92,7 @@ class RpicamJpegBackend:
             height=height,
             quality=quality,
             camera_controls=camera_controls or {},
+            camera_transform=camera_transform or {},
             timeout_ms=timeout_ms,
         )
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -134,6 +138,7 @@ def build_jpeg_capture_command(
     height: int | None,
     quality: int,
     camera_controls: dict[str, Any],
+    camera_transform: dict[str, Any],
     timeout_ms: int,
 ) -> list[str]:
     command = [
@@ -151,6 +156,7 @@ def build_jpeg_capture_command(
     if height is not None:
         command.extend(["--height", str(height)])
     _extend_camera_control_args(command, camera_controls)
+    _extend_camera_transform_args(command, camera_transform)
     return command
 
 
@@ -225,10 +231,20 @@ def _extend_camera_control_args(command: list[str], controls: dict[str, Any]) ->
     _add_value_arg(command, "--awb", controls.get("awb"))
 
 
+def _extend_camera_transform_args(command: list[str], transform: dict[str, Any]) -> None:
+    _add_flag_arg(command, "--hflip", transform.get("hflip"))
+    _add_flag_arg(command, "--vflip", transform.get("vflip"))
+
+
 def _add_value_arg(command: list[str], option: str, value: Any) -> None:
     if not _has_value(value):
         return
     command.extend([option, str(value)])
+
+
+def _add_flag_arg(command: list[str], option: str, value: Any) -> None:
+    if value is True:
+        command.append(option)
 
 
 def _draw_grid(draw: Any, width: int, height: int) -> None:

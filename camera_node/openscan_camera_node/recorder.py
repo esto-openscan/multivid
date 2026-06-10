@@ -192,6 +192,7 @@ class RpicamVidRecorder:
                     profile,
                     output_file,
                     calibration_context.get("suggested_controls_snapshot") if suggestions_applied else None,
+                    self._config.camera_transform.as_dict(),
                 )
                 started_at_dt = _utc_now_dt()
                 started_at = _format_timestamp(started_at_dt)
@@ -621,6 +622,7 @@ class RpicamVidRecorder:
                     height=int(settings["height"]),
                     quality=int(settings["jpeg_quality"]),
                     camera_controls=camera_controls,
+                    camera_transform=self._config.camera_transform.as_dict(),
                     overlay_settings={
                         "camera_id": self._config.camera_id,
                         "overlays": list(settings.get("overlays", [])),
@@ -698,6 +700,8 @@ class RpicamVidRecorder:
                 warnings.append("use_recording_profile_controls is true but no profile was provided; no profile controls were applied")
             if controls_requested and profile is not None and not camera_controls:
                 warnings.append(f"profile {profile.name!r} has no still-applicable camera controls")
+            applied_controls = dict(camera_controls)
+            _extend_applied_controls_with_camera_transform(applied_controls, self._config.camera_transform.as_dict())
 
             manifest: dict[str, Any] = {
                 "schema_version": STILL_MANIFEST_SCHEMA_VERSION,
@@ -723,7 +727,7 @@ class RpicamVidRecorder:
                 "profile_snapshot": profile.as_dict() if profile else None,
                 "use_recording_profile_controls": controls_requested,
                 "requested_controls": profile.requested_controls() if profile and controls_requested else None,
-                "applied_controls": camera_controls,
+                "applied_controls": applied_controls,
                 "notes": notes,
                 "force": force,
                 "warnings": _dedupe(warnings),
@@ -744,6 +748,7 @@ class RpicamVidRecorder:
                     height=resolved_height,
                     quality=resolved_quality,
                     camera_controls=camera_controls,
+                    camera_transform=self._config.camera_transform.as_dict(),
                     timeout_ms=1200,
                 )
             manifest.update(
@@ -1173,6 +1178,7 @@ class RpicamVidRecorder:
                 "camera_id": self._config.camera_id,
                 "backend": BACKEND_NAME,
                 "node_camera_control_policy": self._config.camera_control_policy.as_dict(),
+                "camera_transform": self._config.camera_transform.as_dict(),
                 "profile": profile.as_dict(),
             }
         )
@@ -1298,8 +1304,14 @@ class RpicamVidRecorder:
             "camera_control_policy": policy.as_dict(),
             "requested_controls": profile.requested_controls(),
             "resolved_controls": profile.resolved_controls(),
-            "planned_applied_controls": _applied_controls_for_recording(profile),
-            "applied_controls": _warmup_applied_controls(profile) if warmup_performed else {},
+            "camera_transform": self._config.camera_transform.as_dict(),
+            "planned_applied_controls": _applied_controls_for_recording(
+                profile,
+                camera_transform=self._config.camera_transform.as_dict(),
+            ),
+            "applied_controls": (
+                _warmup_applied_controls(profile, self._config.camera_transform.as_dict()) if warmup_performed else {}
+            ),
             "unsupported_controls": profile.unsupported_controls,
             "warmup_performed": warmup_performed,
             "warmup_command": warmup_command,
@@ -1338,12 +1350,17 @@ class RpicamVidRecorder:
         timeout_seconds = profile.camera_control_policy.prepare_warmup_seconds
         command = [
             BACKEND_NAME,
-            *_drop_options(profile.rpicam_vid_args, "--output", "-o", "--timeout", "-t", "--save-pts"),
+            *_drop_flag_options(
+                _drop_options(profile.rpicam_vid_args, "--output", "-o", "--timeout", "-t", "--save-pts"),
+                "--hflip",
+                "--vflip",
+            ),
             "--output",
             os.devnull,
             "--timeout",
             str(max(1, int(timeout_seconds * 1000))),
         ]
+        _extend_command_with_camera_transform(command, self._config.camera_transform.as_dict())
         result = subprocess.run(
             command,
             stdout=subprocess.DEVNULL,
@@ -1365,8 +1382,9 @@ class RpicamVidRecorder:
         output_file: Path,
         suggested_controls: dict[str, Any] | None = None,
     ) -> list[str]:
-        command = [BACKEND_NAME, *profile.rpicam_vid_args]
+        command = [BACKEND_NAME, *_drop_flag_options(profile.rpicam_vid_args, "--hflip", "--vflip")]
         _extend_command_with_suggestions(command, suggestion_values(suggested_controls))
+        _extend_command_with_camera_transform(command, self._config.camera_transform.as_dict())
         save_pts_path = _save_pts_path(profile, output_file)
         if save_pts_path is not None and not _contains_option(command, "--save-pts"):
             command.extend(["--save-pts", save_pts_path])
@@ -1383,18 +1401,22 @@ class RpicamVidRecorder:
         metadata_path: Path | None,
         duration_seconds: float,
     ) -> list[str]:
-        args = _drop_options(
-            profile.rpicam_vid_args,
-            "--output",
-            "-o",
-            "--timeout",
-            "-t",
-            "--save-pts",
-            "--shutter",
-            "--gain",
-            "--awbgains",
-            "--autofocus-mode",
-            "--lens-position",
+        args = _drop_flag_options(
+            _drop_options(
+                profile.rpicam_vid_args,
+                "--output",
+                "-o",
+                "--timeout",
+                "-t",
+                "--save-pts",
+                "--shutter",
+                "--gain",
+                "--awbgains",
+                "--autofocus-mode",
+                "--lens-position",
+            ),
+            "--hflip",
+            "--vflip",
         )
         command = [
             BACKEND_NAME,
@@ -1404,6 +1426,7 @@ class RpicamVidRecorder:
             "--timeout",
             str(max(1, int(duration_seconds * 1000))),
         ]
+        _extend_command_with_camera_transform(command, self._config.camera_transform.as_dict())
         if metadata_path is not None:
             command.extend(["--metadata", str(metadata_path), "--metadata-format", "json"])
         return command
@@ -1934,12 +1957,18 @@ def _drop_options(args: list[str], *options: str) -> list[str]:
     return dropped
 
 
+def _drop_flag_options(args: list[str], *options: str) -> list[str]:
+    return [item for item in args if item not in options]
+
+
 def _applied_controls_for_recording(
     profile: RecordingProfile,
     output_file: Path | None = None,
     suggested_controls: dict[str, Any] | None = None,
+    camera_transform: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     applied = dict(profile.planned_applied_controls)
+    _extend_applied_controls_with_camera_transform(applied, camera_transform or {})
     suggested_values = suggestion_values(suggested_controls)
     if suggested_values:
         applied.update(_applied_controls_from_suggestion_values(suggested_values))
@@ -1952,13 +1981,28 @@ def _applied_controls_for_recording(
     return applied
 
 
-def _warmup_applied_controls(profile: RecordingProfile) -> dict[str, Any]:
+def _warmup_applied_controls(profile: RecordingProfile, camera_transform: dict[str, Any] | None = None) -> dict[str, Any]:
     applied = dict(profile.planned_applied_controls)
+    _extend_applied_controls_with_camera_transform(applied, camera_transform or {})
     applied.pop("duration", None)
     applied.pop("timeout_ms", None)
     if applied:
         applied["backend"] = BACKEND_NAME
     return applied
+
+
+def _extend_applied_controls_with_camera_transform(applied: dict[str, Any], camera_transform: dict[str, Any]) -> None:
+    if camera_transform.get("hflip") is True:
+        applied["hflip"] = True
+    if camera_transform.get("vflip") is True:
+        applied["vflip"] = True
+
+
+def _extend_command_with_camera_transform(command: list[str], camera_transform: dict[str, Any]) -> None:
+    if camera_transform.get("hflip") is True and not _contains_option(command, "--hflip"):
+        command.append("--hflip")
+    if camera_transform.get("vflip") is True and not _contains_option(command, "--vflip"):
+        command.append("--vflip")
 
 
 def _extend_command_with_suggestions(command: list[str], values: dict[str, Any]) -> None:

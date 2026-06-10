@@ -355,7 +355,6 @@ def _parse_camera_controls(raw_controls: Any, path: Path, profile_name: str) -> 
         controls["metering"] = _read_optional_string(raw_controls, "metering", path, profile_name, "camera_controls")
     if "awb" in raw_controls:
         controls["awb"] = _read_optional_string(raw_controls, "awb", path, profile_name, "camera_controls")
-
     return controls, unsupported
 
 
@@ -400,7 +399,6 @@ def _build_rpicam_args(recording: dict[str, Any], camera_controls: dict[str, Any
     _add_value_arg(args, applied, "ev", "--ev", camera_controls.get("ev"))
     _add_value_arg(args, applied, "metering", "--metering", camera_controls.get("metering"))
     _add_value_arg(args, applied, "awb", "--awb", camera_controls.get("awb"))
-
     return args, applied
 
 

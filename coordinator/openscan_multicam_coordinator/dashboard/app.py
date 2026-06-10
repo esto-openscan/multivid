@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+import httpx
+from fastapi import FastAPI, HTTPException, Response
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -93,6 +95,49 @@ def create_app(
     async def api_status() -> dict[str, Any]:
         return await _run_operation(state, "status", RequestSpec("GET", "/status"))
 
+    @app.get("/api/previews/{node_name}/snapshot.jpg")
+    async def api_preview_snapshot(node_name: str) -> Response:
+        node = _node_by_name(state, node_name)
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0)) as client:
+                response = await client.get(f"{node.base_url}/positioning/snapshot.jpg")
+        except httpx.RequestError as exc:
+            raise HTTPException(status_code=502, detail=f"{node.name}: preview snapshot unavailable: {exc}") from exc
+
+        if not response.is_success:
+            detail = _response_error_detail(response)
+            raise HTTPException(status_code=response.status_code, detail=detail)
+
+        return Response(
+            content=response.content,
+            media_type=response.headers.get("content-type", "image/jpeg"),
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @app.get("/api/previews/{node_name}/stream.mjpg")
+    async def api_preview_stream(node_name: str) -> StreamingResponse:
+        node = _node_by_name(state, node_name)
+        timeout = httpx.Timeout(connect=8.0, read=None, write=8.0, pool=8.0)
+        client = httpx.AsyncClient(timeout=timeout)
+        request = client.build_request("GET", f"{node.base_url}/positioning/stream.mjpg")
+        try:
+            response = await client.send(request, stream=True)
+        except httpx.RequestError as exc:
+            await client.aclose()
+            raise HTTPException(status_code=502, detail=f"{node.name}: preview stream unavailable: {exc}") from exc
+
+        if not response.is_success:
+            detail = await _stream_error_detail(response)
+            await response.aclose()
+            await client.aclose()
+            raise HTTPException(status_code=response.status_code, detail=detail)
+
+        return StreamingResponse(
+            _stream_upstream_response(response, client),
+            media_type=response.headers.get("content-type", "multipart/x-mixed-replace; boundary=openscan-positioning"),
+            headers={"Cache-Control": "no-store"},
+        )
+
     @app.post("/api/positioning/start")
     async def api_positioning_start(request: PositioningStartRequest) -> dict[str, Any]:
         defaults = state.dashboard_config.positioning
@@ -170,7 +215,60 @@ def create_app(
 
 async def _run_operation(state: DashboardState, operation: str, spec: RequestSpec) -> dict[str, Any]:
     results = await request_nodes(state.nodes, spec)
-    return aggregate_operation_response(operation, results)
+    return _with_preview_proxy_urls(aggregate_operation_response(operation, results))
+
+
+def _node_by_name(state: DashboardState, node_name: str) -> NodeConfig:
+    for node in state.nodes:
+        if node.name == node_name:
+            return node
+    raise HTTPException(status_code=404, detail=f"unknown camera node: {node_name}")
+
+
+def _with_preview_proxy_urls(response: dict[str, Any]) -> dict[str, Any]:
+    for item in response.get("nodes", []):
+        if not isinstance(item, dict):
+            continue
+        node = item.get("node") if isinstance(item.get("node"), dict) else {}
+        node_name = node.get("name")
+        if not node_name:
+            continue
+        quoted_name = quote(str(node_name), safe="")
+        item["snapshot_url"] = f"/api/previews/{quoted_name}/snapshot.jpg"
+        item["stream_url"] = f"/api/previews/{quoted_name}/stream.mjpg"
+    return response
+
+
+async def _stream_upstream_response(response: httpx.Response, client: httpx.AsyncClient):
+    try:
+        async for chunk in response.aiter_bytes():
+            yield chunk
+    finally:
+        await response.aclose()
+        await client.aclose()
+
+
+def _response_error_detail(response: httpx.Response) -> str:
+    try:
+        data = response.json()
+    except ValueError:
+        return response.text or f"HTTP {response.status_code}"
+    if isinstance(data, dict) and data.get("detail"):
+        return str(data["detail"])
+    return response.text or f"HTTP {response.status_code}"
+
+
+async def _stream_error_detail(response: httpx.Response) -> str:
+    content = await response.aread()
+    try:
+        data = response.json()
+    except ValueError:
+        text = content.decode(response.encoding or "utf-8", errors="replace")
+        return text or f"HTTP {response.status_code}"
+    if isinstance(data, dict) and data.get("detail"):
+        return str(data["detail"])
+    text = content.decode(response.encoding or "utf-8", errors="replace")
+    return text or f"HTTP {response.status_code}"
 
 
 def _dashboard_config_response(config: DashboardConfig) -> dict[str, Any]:

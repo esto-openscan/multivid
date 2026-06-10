@@ -11,6 +11,7 @@ import httpx
 from .client import NodeResult, request_node
 from .config import DEFAULT_NODES_PATH, NodeConfig, load_nodes_config
 from .harvest import DEFAULT_BACKEND, DEFAULT_HARVEST_OUTPUT_ROOT, HarvestOptions, harvest_session
+from .stringout import DEFAULT_FPS, DEFAULT_RESOLUTION, DEFAULT_SPEED, StringoutOptions, derive_stringout
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -114,6 +115,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="Compute sha256 for video files in the generated session index",
     )
 
+    stringout_parser = subparsers.add_parser(
+        "derive-stringout",
+        help="Generate a multicam review stringout from a harvested session folder",
+    )
+    stringout_parser.add_argument("--session-path", required=True, help="Path to a harvested session folder")
+    stringout_parser.add_argument("--output-dir", help="Directory for review derivatives; defaults under the session")
+    stringout_parser.add_argument("--speed", type=float, default=DEFAULT_SPEED, help="Playback speed factor")
+    stringout_parser.add_argument("--fps", type=int, default=DEFAULT_FPS, help="Output frame rate")
+    stringout_parser.add_argument("--resolution", default=DEFAULT_RESOLUTION, help="Output resolution, WIDTHxHEIGHT")
+    stringout_parser.add_argument("--take", dest="take_id", help="Render only one take id")
+    stringout_parser.add_argument(
+        "--include-cameras",
+        help="Comma-separated camera ids to include, such as front,side,top",
+    )
+    stringout_parser.add_argument("--overwrite", action="store_true", help="Overwrite an existing stringout output")
+    stringout_parser.add_argument("--dry-run", action="store_true", help="Plan the render without calling ffmpeg")
+    stringout_parser.add_argument("--no-slate", action="store_true", help="Do not render take slate sections")
+    stringout_parser.add_argument("--no-labels", action="store_true", help="Do not burn camera labels into the grid")
+    stringout_parser.add_argument("--realtime", action="store_true", help="Shortcut for --speed 1")
+
     dashboard_parser = subparsers.add_parser("dashboard", help="Run the local browser operator dashboard")
     dashboard_parser.add_argument("--config", help="Path to nodes.yml; defaults to --nodes")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host")
@@ -127,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "derive-stringout":
+        return _run_stringout_command(args)
 
     nodes_path = getattr(args, "config", None) or args.nodes
     try:
@@ -173,6 +197,36 @@ def _run_harvest_command(args: argparse.Namespace, nodes: list[NodeConfig]) -> i
     if outcome.complete or args.allow_partial:
         return 0
     return 1
+
+
+def _run_stringout_command(args: argparse.Namespace) -> int:
+    include_cameras = _parse_comma_list(args.include_cameras)
+    options = StringoutOptions(
+        session_path=Path(args.session_path),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        speed=1.0 if args.realtime else args.speed,
+        fps=args.fps,
+        resolution=args.resolution,
+        take_id=args.take_id,
+        include_cameras=tuple(include_cameras),
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
+        no_slate=args.no_slate,
+        no_labels=args.no_labels,
+    )
+    try:
+        report = derive_stringout(options)
+    except Exception as exc:
+        print(f"Stringout failed: {exc}", file=sys.stderr)
+        return 1
+    _print_stringout_summary(report)
+    return 0 if report.get("overall_status") in {"complete", "partial"} else 1
+
+
+def _parse_comma_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
 
 
 def _run_dashboard_command(args: argparse.Namespace, nodes: list[NodeConfig], config_path: str | Path) -> int:
@@ -394,6 +448,51 @@ def _print_harvest_summary(report: dict[str, Any], dry_run: bool = False) -> Non
     if not dry_run:
         print(f"Index: {report.get('session_dir')}/session_index.json")
         print(f"Report: {report.get('session_dir')}/harvest_report.json")
+
+
+def _print_stringout_summary(report: dict[str, Any]) -> None:
+    mode = "DRY RUN " if report.get("dry_run") else ""
+    print(
+        f"{mode}stringout session={report.get('session_id')} status={report.get('overall_status')} "
+        f"output={report.get('output_file_path')}"
+    )
+    take_sections = report.get("take_sections") if isinstance(report.get("take_sections"), list) else []
+    rows: list[dict[str, str]] = []
+    for take in take_sections:
+        if not isinstance(take, dict):
+            continue
+        rows.append(
+            {
+                "take": str(take.get("take_id", "")),
+                "status": str(take.get("status", "")),
+                "cameras": ",".join(str(item) for item in take.get("included_cameras", [])),
+                "missing": ",".join(str(item) for item in take.get("missing_cameras", [])),
+                "duration": _format_seconds(take.get("common_duration_seconds")),
+                "warnings": str(len(take.get("warnings", []))),
+            }
+        )
+    if rows:
+        _print_table(rows, ["take", "status", "cameras", "missing", "duration", "warnings"])
+
+    warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    if errors:
+        print("Errors:")
+        for error in errors:
+            print(f"  - {error}")
+    if not report.get("dry_run"):
+        print(f"Report: {report.get('report_file_path')}")
+        print(f"Commands: {report.get('ffmpeg_commands_file_path')}")
+
+
+def _format_seconds(value: Any) -> str:
+    if isinstance(value, (int, float)):
+        return f"{float(value):.2f}s"
+    return "-"
 
 
 def _print_table(rows: list[dict[str, str]], columns: list[str]) -> None:

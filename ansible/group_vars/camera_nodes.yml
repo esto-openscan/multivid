@@ -19,6 +19,9 @@ openscan_camera_node_listen_host: "0.0.0.0"
 openscan_camera_node_listen_port: 8080
 openscan_camera_control_policy_use_calibration_suggestions: false
 openscan_camera_control_policy_apply_suggestions_to_recording: false
+openscan_camera_transform:
+  hflip: false
+  vflip: false
 openscan_positioning_width: 640
 openscan_positioning_height: 360
 openscan_positioning_fps: 5

@@ -214,6 +214,19 @@ class DashboardAppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["operation"], "status")
         self.assertEqual(data["node_count"], 1)
         self.assertEqual(data["nodes"][0]["node"]["name"], "front")
+        self.assertEqual(data["nodes"][0]["snapshot_url"], "/api/previews/front/snapshot.jpg")
+        self.assertEqual(data["nodes"][0]["stream_url"], "/api/previews/front/stream.mjpg")
+
+    async def test_preview_proxy_rejects_unknown_node(self) -> None:
+        assert create_app is not None
+        from fastapi import HTTPException
+
+        app = create_app("unused.yml", nodes=[], dashboard_config=DashboardConfig())
+
+        with self.assertRaises(HTTPException) as raised:
+            await _route_for(app, "/api/previews/{node_name}/snapshot.jpg").endpoint("missing")
+
+        self.assertEqual(raised.exception.status_code, 404)
 
 
 def _route_for(app, path: str):

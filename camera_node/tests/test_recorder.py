@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from openscan_camera_node.config import CameraNodeConfig, NodeCameraControlPolicy
+from openscan_camera_node.config import CameraNodeConfig, CameraTransform, NodeCameraControlPolicy, load_camera_node_config
 from openscan_camera_node.profiles import load_recording_profiles
 from openscan_camera_node.recorder import AlreadyPositioningError, AlreadyRecordingError, RpicamVidRecorder
 
@@ -32,6 +32,24 @@ class FakeProcess:
 
 
 class RecorderTests(unittest.TestCase):
+    def test_camera_transform_loads_from_node_config(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "config.yaml"
+            path.write_text(
+                """
+camera_id: top
+camera_transform:
+  hflip: true
+  vflip: true
+""",
+                encoding="utf-8",
+            )
+
+            config = load_camera_node_config(path)
+
+        self.assertTrue(config.camera_transform.hflip)
+        self.assertTrue(config.camera_transform.vflip)
+
     def test_prepare_reuses_valid_state_and_records_refocus_request(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             recorder = _new_recorder(Path(temp_dir))
@@ -101,6 +119,8 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(manifest["applied_controls"]["shutter_us"], 20000)
         self.assertEqual(manifest["applied_controls"]["awbgains"], [1.75, 1.42])
         self.assertEqual(manifest["applied_controls"]["lens_position"], 1.8)
+        self.assertTrue(manifest["applied_controls"]["hflip"])
+        self.assertTrue(manifest["applied_controls"]["vflip"])
         self.assertEqual(manifest["actually_applied_controls"], manifest["applied_controls"])
         self.assertIn("--codec", manifest["rpicam_vid_command"])
         self.assertIn("h264", manifest["rpicam_vid_command"])
@@ -109,6 +129,8 @@ class RecorderTests(unittest.TestCase):
         self.assertIn("--shutter", manifest["rpicam_vid_command"])
         self.assertIn("--awbgains", manifest["rpicam_vid_command"])
         self.assertIn("1.75,1.42", manifest["rpicam_vid_command"])
+        self.assertIn("--hflip", manifest["rpicam_vid_command"])
+        self.assertIn("--vflip", manifest["rpicam_vid_command"])
         self.assertTrue(prepared_state["valid"])
         self.assertEqual(prepared_state["planned_applied_controls"]["shutter_us"], 20000)
 
@@ -224,7 +246,7 @@ class RecorderTests(unittest.TestCase):
     def test_positioning_snapshot_uses_jpeg_backend_and_updates_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             recorder = _new_recorder(Path(temp_dir))
-            recorder.start_positioning(width=320, height=180, fps=5, overlays=[])
+            recorder.start_positioning(width=320, height=180, fps=5, overlays=[], profile_name="video")
 
             with (
                 patch("openscan_camera_node.imaging.shutil.which", return_value="/usr/bin/rpicam-still"),
@@ -235,6 +257,8 @@ class RecorderTests(unittest.TestCase):
 
         self.assertEqual(image_bytes, b"jpeg")
         self.assertEqual(metadata["backend"], "rpicam-still")
+        self.assertIn("--hflip", metadata["command"])
+        self.assertIn("--vflip", metadata["command"])
         self.assertEqual(status["frames_served"], 1)
         self.assertEqual(status["last_backend"], "rpicam-still")
 
@@ -310,6 +334,10 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(first_manifest["backend"], "rpicam-still")
         self.assertTrue(first_manifest["use_recording_profile_controls"])
         self.assertEqual(first_manifest["applied_controls"]["shutter_us"], 20000)
+        self.assertTrue(first_manifest["applied_controls"]["hflip"])
+        self.assertTrue(first_manifest["applied_controls"]["vflip"])
+        self.assertIn("--hflip", first_manifest["backend_command"])
+        self.assertIn("--vflip", first_manifest["backend_command"])
         self.assertEqual(summary["take_count"], 0)
         self.assertEqual(summary["reference_still_count"], 2)
         image_paths = {
@@ -364,6 +392,7 @@ profiles:
             use_calibration_suggestions=False,
             apply_suggestions_to_recording=False,
         ),
+        camera_transform=CameraTransform(hflip=True, vflip=True),
     )
     return RpicamVidRecorder(config=config, profiles=load_recording_profiles(profiles_path))
 

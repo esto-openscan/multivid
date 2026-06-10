@@ -36,6 +36,18 @@ class NodeCameraControlPolicy:
 
 
 @dataclass(frozen=True)
+class CameraTransform:
+    hflip: bool = False
+    vflip: bool = False
+
+    def as_dict(self) -> dict[str, bool]:
+        return {
+            "hflip": self.hflip,
+            "vflip": self.vflip,
+        }
+
+
+@dataclass(frozen=True)
 class PositioningConfig:
     width: int
     height: int
@@ -77,6 +89,7 @@ class CameraNodeConfig:
     output_root: Path
     profile_overrides: dict[str, Any]
     camera_control_policy: NodeCameraControlPolicy
+    camera_transform: CameraTransform = field(default_factory=CameraTransform)
     positioning: PositioningConfig = field(
         default_factory=lambda: PositioningConfig(
             width=640,
@@ -114,6 +127,7 @@ def load_camera_node_config(path: str | Path | None = None) -> CameraNodeConfig:
     output_root = Path(str(raw_config.get("output_root", "/srv/openscan-camera/sessions")))
     profile_overrides = _profile_overrides(raw_config.get("profile_overrides", {}), config_path)
     camera_control_policy = _camera_control_policy(raw_config.get("camera_control_policy", {}), config_path)
+    camera_transform = _camera_transform(raw_config.get("camera_transform", {}), config_path)
     positioning = _positioning_config(raw_config.get("positioning", {}), config_path)
     reference_stills = _reference_stills_config(raw_config.get("reference_stills", {}), config_path)
 
@@ -127,6 +141,7 @@ def load_camera_node_config(path: str | Path | None = None) -> CameraNodeConfig:
         output_root=output_root,
         profile_overrides=profile_overrides,
         camera_control_policy=camera_control_policy,
+        camera_transform=camera_transform,
         positioning=positioning,
         reference_stills=reference_stills,
     )
@@ -185,6 +200,17 @@ def _camera_control_policy(raw_value: Any, path: Path) -> NodeCameraControlPolic
             path,
             "camera_control_policy",
         ),
+    )
+
+
+def _camera_transform(raw_value: Any, path: Path) -> CameraTransform:
+    if raw_value is None:
+        raw_value = {}
+    if not isinstance(raw_value, dict):
+        raise ValueError(f"{path}: camera_transform must be a mapping")
+    return CameraTransform(
+        hflip=_read_bool(raw_value, "hflip", False, path, "camera_transform"),
+        vflip=_read_bool(raw_value, "vflip", False, path, "camera_transform"),
     )
 
 

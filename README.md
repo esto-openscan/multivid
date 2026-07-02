@@ -601,7 +601,81 @@ multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001 --
 
 With `--take take_001`, the default output is only the matching per-take file under `derivatives/review/takes/`. Add `--no-per-take` if you want the older single-output behavior for a selected take. The command does not overwrite existing full-session or per-take outputs unless `--overwrite` is passed. `--dry-run` parses the session index, resolves takes/cameras/files, prints the planned output, and does not call `ffmpeg` or write video/report files.
 
+## Preparing edit assets
+
+Node recordings are raw `.h264` capture masters. For manual editing, the coordinator can remux those recordings into MP4 containers that are easier to import, inspect, and organize in Kdenlive or another NLE. The default master generation uses `ffmpeg -c copy`, so it does not re-encode and should not reduce quality.
+
+Default output:
+
+```text
+harvested_sessions/<session_id>/edit_assets/
+  masters_mp4/
+    front_take_001.mp4
+    side_take_001.mp4
+    top_take_001.mp4
+  proxies/
+    front_take_001_proxy.mp4
+  edit_assets_index.json
+  edit_assets_index.csv
+  edit_assets_report.json
+  kdenlive_import_notes.md
+  import_list.txt
+```
+
+Proxy generation is optional because Kdenlive can also generate proxies itself. When `--proxies` is used, the coordinator writes low-bitrate H.264 MP4 proxy files under `edit_assets/proxies/`.
+
+Example workflow:
+
+1. Record a session.
+2. Harvest:
+
+   ```bash
+   multicam harvest --session benchy_scan_001 --output ./harvested_sessions
+   ```
+
+3. Generate a review stringout:
+
+   ```bash
+   multicam derive-stringout --session-path ./harvested_sessions/benchy_scan_001
+   ```
+
+4. Prepare edit assets:
+
+   ```bash
+   multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001
+   ```
+
+5. Open Kdenlive.
+6. Import:
+   - `edit_assets/masters_mp4/`
+   - `derivatives/review/multicam_stringout.mp4`
+   - reference stills from the harvested session if useful
+
+Useful options:
+
+```bash
+multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001 --dry-run
+multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001 --proxies
+multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001 --proxy-height 540 --proxies
+multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001 --include-cameras front,side,top
+multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001 --take take_001
+multicam prepare-edit-assets --session-path ./harvested_sessions/benchy_scan_001 --overwrite
+```
+
+The command does not overwrite existing MP4 masters or proxies unless `--overwrite` is passed. `--dry-run` parses `session_index.json`, resolves recordings, shows planned outputs, and does not call `ffmpeg` or write video/report files.
+
 ### What this milestone intentionally does not do
+
+- No Kdenlive project generation.
+- No automatic timeline.
+- No edit decisions.
+- No final rendering.
+- No Shorts generation.
+- No clip selection.
+- No color correction.
+- No audio workflow.
+
+### What the stringout milestone intentionally does not do
 
 - No final edit.
 - No Shorts.

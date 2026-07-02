@@ -10,6 +10,7 @@ import httpx
 
 from .client import NodeResult, request_node
 from .config import DEFAULT_NODES_PATH, NodeConfig, load_nodes_config
+from .edit_assets import DEFAULT_PROXY_HEIGHT, EditAssetOptions, prepare_edit_assets
 from .harvest import DEFAULT_BACKEND, DEFAULT_HARVEST_OUTPUT_ROOT, HarvestOptions, harvest_session
 from .stringout import DEFAULT_FPS, DEFAULT_RESOLUTION, DEFAULT_SPEED, StringoutOptions, derive_stringout
 
@@ -136,6 +137,27 @@ def build_parser() -> argparse.ArgumentParser:
     stringout_parser.add_argument("--no-per-take", action="store_true", help="Do not render individual per-take stringouts")
     stringout_parser.add_argument("--realtime", action="store_true", help="Shortcut for --speed 1")
 
+    edit_assets_parser = subparsers.add_parser(
+        "prepare-edit-assets",
+        help="Prepare edit-friendly MP4 assets from a harvested session folder",
+    )
+    edit_assets_parser.add_argument("--session-path", required=True, help="Path to a harvested session folder")
+    edit_assets_parser.add_argument("--output-dir", help="Directory for edit assets; defaults under the session")
+    edit_assets_parser.add_argument("--proxies", action="store_true", help="Generate optional low-bitrate proxy MP4 files")
+    edit_assets_parser.add_argument(
+        "--proxy-height",
+        type=int,
+        default=DEFAULT_PROXY_HEIGHT,
+        help="Maximum proxy height in pixels",
+    )
+    edit_assets_parser.add_argument("--overwrite", action="store_true", help="Overwrite existing edit assets")
+    edit_assets_parser.add_argument("--dry-run", action="store_true", help="Plan outputs without calling ffmpeg or writing files")
+    edit_assets_parser.add_argument(
+        "--include-cameras",
+        help="Comma-separated camera ids to include, such as front,side,top",
+    )
+    edit_assets_parser.add_argument("--take", dest="take_id", help="Prepare only one take id")
+
     dashboard_parser = subparsers.add_parser("dashboard", help="Run the local browser operator dashboard")
     dashboard_parser.add_argument("--config", help="Path to nodes.yml; defaults to --nodes")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host")
@@ -152,6 +174,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "derive-stringout":
         return _run_stringout_command(args)
+    if args.command == "prepare-edit-assets":
+        return _run_edit_assets_command(args)
 
     nodes_path = getattr(args, "config", None) or args.nodes
     try:
@@ -222,6 +246,27 @@ def _run_stringout_command(args: argparse.Namespace) -> int:
         print(f"Stringout failed: {exc}", file=sys.stderr)
         return 1
     _print_stringout_summary(report)
+    return 0 if report.get("overall_status") in {"complete", "partial"} else 1
+
+
+def _run_edit_assets_command(args: argparse.Namespace) -> int:
+    include_cameras = _parse_comma_list(args.include_cameras)
+    options = EditAssetOptions(
+        session_path=Path(args.session_path),
+        output_dir=Path(args.output_dir) if args.output_dir else None,
+        proxies=args.proxies,
+        proxy_height=args.proxy_height,
+        overwrite=args.overwrite,
+        dry_run=args.dry_run,
+        include_cameras=tuple(include_cameras),
+        take_id=args.take_id,
+    )
+    try:
+        report = prepare_edit_assets(options)
+    except Exception as exc:
+        print(f"Edit asset preparation failed: {exc}", file=sys.stderr)
+        return 1
+    _print_edit_assets_summary(report)
     return 0 if report.get("overall_status") in {"complete", "partial"} else 1
 
 
@@ -492,6 +537,49 @@ def _print_stringout_summary(report: dict[str, Any]) -> None:
     per_take_paths = report.get("per_take_output_file_paths")
     if isinstance(per_take_paths, dict) and per_take_paths:
         print(f"Per-take outputs: {len(per_take_paths)}")
+
+
+def _print_edit_assets_summary(report: dict[str, Any]) -> None:
+    mode = "DRY RUN " if report.get("dry_run") else ""
+    print(
+        f"{mode}edit-assets session={report.get('session_id')} status={report.get('overall_status')} "
+        f"output={report.get('output_path')}"
+    )
+    assets = report.get("assets") if isinstance(report.get("assets"), list) else []
+    rows: list[dict[str, str]] = []
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        rows.append(
+            {
+                "asset": str(asset.get("asset_id", "")),
+                "camera": str(asset.get("camera_id", "")),
+                "take": str(asset.get("take_id", "")),
+                "master": str(asset.get("master_status", "")),
+                "proxy": str(asset.get("proxy_status") or "-"),
+                "duration": _format_seconds(asset.get("duration")),
+                "warnings": str(len(asset.get("warnings", []))),
+                "errors": str(len(asset.get("errors", []))),
+            }
+        )
+    if rows:
+        _print_table(rows, ["asset", "camera", "take", "master", "proxy", "duration", "warnings", "errors"])
+
+    warnings = report.get("warnings") if isinstance(report.get("warnings"), list) else []
+    errors = report.get("errors") if isinstance(report.get("errors"), list) else []
+    if warnings:
+        print("Warnings:")
+        for warning in warnings:
+            print(f"  - {warning}")
+    if errors:
+        print("Errors:")
+        for error in errors:
+            print(f"  - {error}")
+    if not report.get("dry_run"):
+        print(f"Index: {report.get('edit_assets_index_json')}")
+        print(f"CSV: {report.get('edit_assets_index_csv')}")
+        print(f"Report: {report.get('output_path')}/edit_assets_report.json")
+        print(f"Import notes: {report.get('kdenlive_import_notes')}")
 
 
 def _format_seconds(value: Any) -> str:

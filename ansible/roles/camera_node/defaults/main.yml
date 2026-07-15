@@ -1,0 +1,26 @@
+openscan_node_config_dir: /etc/openscan-camera-node
+openscan_camera_node_install_dir: /opt/openscan-camera-node
+openscan_camera_node_venv: "{{ openscan_camera_node_install_dir }}/venv"
+openscan_camera_node_package_src: "{{ playbook_dir }}/../../camera_node"
+openscan_camera_node_profiles_src: "{{ playbook_dir }}/../../examples/profiles.yml"
+openscan_camera_transform: {}
+openscan_camera_node_profile_overrides: {}
+openscan_camera_boot_config_lines:
+  - regexp: '^#?\s*camera_auto_detect=.*$'
+    line: camera_auto_detect=0
+  - regexp: '^#?\s*dtoverlay=imx519.*$'
+    line: dtoverlay=imx519
+openscan_arducam_pivariety_install: true
+openscan_arducam_pivariety_script_url: https://github.com/ArduCAM/Arducam-Pivariety-V4L2-Driver/releases/download/install_script/install_pivariety_pkgs.sh
+openscan_arducam_pivariety_install_dir: /opt/arducam-pivariety
+openscan_arducam_pivariety_log_dir: /var/log/openscan-camera
+openscan_arducam_pivariety_marker_dir: /var/lib/openscan-camera/arducam-pivariety
+openscan_arducam_pivariety_prerequisite_packages:
+  - libopencv-core410
+  - libopencv-imgproc410
+  - libopencv-objdetect410
+  - rpicam-apps-opencv-postprocess
+openscan_arducam_pivariety_packages:
+  - libcamera_dev
+  - libcamera_apps
+openscan_arducam_pivariety_install_timeout: 1800

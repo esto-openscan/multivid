@@ -17,10 +17,11 @@ There is no Docker, no Swarm, no final OpenScan3 web UI, and no video postproces
 ## Repository Layout
 
 ```text
-ansible/       Raspberry Pi provisioning playbook, inventory, and roles
+ansible/       Raspberry Pi provisioning playbook, dynamic inventory, and roles
 camera_node/   FastAPI camera-node HTTP service
 coordinator/   multicam CLI for controlling nodes
-examples/      example node and recording profile config
+examples/      recording profile config
+multivid.yml   local fleet configuration (not committed)
 ```
 
 ## Starting Point
@@ -53,36 +54,32 @@ The example config also enables Arducam's Pivariety installer with `openscan_ard
 3. Confirm SSH access from your laptop:
 
    ```bash
-   ssh pi@cam-front.local
+   ssh user@cam-front.local
    ```
 
-4. Copy and edit the inventory:
+4. Copy and edit the fleet configuration:
 
    ```bash
-   cp ansible/inventory.example.yml ansible/inventory.yml
-   $EDITOR ansible/inventory.yml
+   cp multivid.example.yml multivid.yml
+   $EDITOR multivid.yml
    ```
 
-   Update `ansible_host`, `ansible_user`, and each `camera_id`. If you prefer host var files, copy the examples in `ansible/host_vars/*.example.yml` to matching `.yml` files.
+   It contains the bootstrap SSH user, private key and node hosts. HTTP URLs, harvest user, ports and service paths are derived defaults.
 
-5. Set the Samba password in `ansible/group_vars/camera_nodes.yml`.
-
-   For quick MVP testing the example config enables anonymous Samba access with `openscan_samba_guest_access: true`. Set that to `false` to require the configured Samba user and password. If you store a real password there, use Ansible Vault.
-
-6. Run the playbook from the repository root:
+5. Run the playbook from the repository root:
 
    ```bash
-   ansible-playbook -i ansible/inventory.yml ansible/playbooks/site.yml
+   ansible-playbook ansible/playbooks/site.yml
    ```
 
-7. Check camera-node health:
+6. Check camera-node health:
 
    ```bash
    curl http://cam-front.local:8080/health
    curl http://cam-side.local:8080/status
    ```
 
-8. Install the coordinator CLI on your laptop:
+7. Install the coordinator CLI on your laptop:
 
    ```bash
    python3 -m venv .venv
@@ -90,22 +87,22 @@ The example config also enables Arducam's Pivariety installer with `openscan_ard
    pip install -e coordinator
    ```
 
-9. Edit `examples/nodes.yml`, then start a test recording:
+8. Start a test recording:
 
    ```bash
-   multicam --nodes examples/nodes.yml status
-   multicam --nodes examples/nodes.yml profiles
-   multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25_auto
-   multicam --nodes examples/nodes.yml stop
+   multicam --config multivid.yml status
+   multicam --config multivid.yml profiles
+   multicam --config multivid.yml start --session test-001 --profile video_1080p25_auto
+   multicam --config multivid.yml stop
    ```
 
-10. Harvest the distributed recording into one local session folder:
+9. Harvest the distributed recording into one local session folder:
 
    ```bash
-   multicam --nodes examples/nodes.yml harvest --session test-001 --output ./harvested_sessions
+   multicam --config multivid.yml harvest --session test-001 --output ./harvested_sessions
    ```
 
-11. Access recordings manually through Samba when needed:
+10. Access recordings manually through Samba when needed:
 
    ```text
    smb://cam-front.local/openscan-camera
@@ -245,15 +242,15 @@ Positioning preview is a low-resolution, low-framerate setup mode for physically
 Start preview across all configured nodes:
 
 ```bash
-multicam --nodes examples/nodes.yml positioning-start --overlay crosshair --overlay shorts-safe-area
+multicam --config multivid.yml positioning-start --overlay crosshair --overlay shorts-safe-area
 ```
 
 Useful options:
 
 ```bash
-multicam --nodes examples/nodes.yml positioning-start --width 640 --height 360 --fps 5
-multicam --nodes examples/nodes.yml positioning-status
-multicam --nodes examples/nodes.yml positioning-urls
+multicam --config multivid.yml positioning-start --width 640 --height 360 --fps 5
+multicam --config multivid.yml positioning-status
+multicam --config multivid.yml positioning-urls
 ```
 
 `positioning-urls` prints browser-openable URLs for each node:
@@ -273,7 +270,7 @@ Supported overlays are:
 The node enters the `positioning` state while preview is active. Recording, calibration, and reference still capture are rejected while positioning is active. Stop preview before recording:
 
 ```bash
-multicam --nodes examples/nodes.yml positioning-stop
+multicam --config multivid.yml positioning-stop
 ```
 
 ## Reference stills
@@ -283,14 +280,14 @@ Reference stills are high-quality JPEGs for focus, framing, lighting, and 9:16 c
 Capture one still per node:
 
 ```bash
-multicam --nodes examples/nodes.yml stills-capture --session test-001 --label alignment_001
+multicam --config multivid.yml stills-capture --session test-001 --label alignment_001
 ```
 
 Optional controls:
 
 ```bash
-multicam --nodes examples/nodes.yml stills-capture --session test-001 --label alignment_001 --profile video_1080p25_locked
-multicam --nodes examples/nodes.yml stills-status
+multicam --config multivid.yml stills-capture --session test-001 --label alignment_001 --profile video_1080p25_locked
+multicam --config multivid.yml stills-status
 ```
 
 Each node stores reference stills under:
@@ -331,7 +328,7 @@ Milestone 4.6 adds a small host-side browser dashboard for local capture operati
 Start it from the repository environment where the coordinator package is installed:
 
 ```bash
-multicam dashboard --config examples/nodes.yml --port 8090
+multicam --config multivid.yml dashboard --port 8090
 ```
 
 Then open:
@@ -358,7 +355,7 @@ The dashboard shows all configured camera nodes on one page and can:
 
 Example dashboard workflow:
 
-1. Start dashboard: `multicam dashboard --config examples/nodes.yml --port 8090`
+1. Start dashboard: `multicam --config multivid.yml dashboard --port 8090`
 2. Open `http://localhost:8090`.
 3. Enter `session_id`.
 4. Start positioning.
@@ -370,21 +367,7 @@ Example dashboard workflow:
 10. Stop recording.
 11. Harvest from the CLI for now.
 
-Dashboard defaults can be added to `examples/nodes.yml`:
-
-```yaml
-dashboard:
-  positioning:
-    width: 640
-    height: 360
-    fps: 5
-    jpeg_quality: 75
-    overlays:
-      - camera_label
-      - crosshair
-      - shorts_safe_area
-  status_refresh_seconds: 3
-```
+Dashboard and positioning defaults are built into the application. Override positioning settings per command when required.
 
 The dashboard respects node-side state validation. It does not force-stop positioning before recording, does not apply calibration suggestions as part of calibration capture, and does not hide partial failures. Recording profiles still decide whether linked calibration suggestions are applied to `rpicam-vid`.
 
@@ -430,9 +413,9 @@ The first harvesting backend is `rsync_ssh`. Samba remains useful for manual bro
 Example workflow:
 
 ```bash
-multicam --nodes examples/nodes.yml start --session benchy_scan_001 --profile video_1080p25_locked
-multicam --nodes examples/nodes.yml stop
-multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --output ./harvested_sessions
+multicam --config multivid.yml start --session benchy_scan_001 --profile video_1080p25_locked
+multicam --config multivid.yml stop
+multicam --config multivid.yml harvest --session benchy_scan_001 --output ./harvested_sessions
 ```
 
 Inspect:
@@ -472,59 +455,49 @@ harvested_sessions/
 
 Harvesting copies `reference_stills/*.jpg` and `reference_stills/*_manifest.json`. `session_index.json` includes `reference_stills` per node with label, file paths, timestamp, manifest summary, warnings, and errors. Reference stills are indexed separately and are not treated as recording takes.
 
-Configure harvesting in `examples/nodes.yml`:
+Harvesting uses the same `multivid.yml` connection and node definitions:
 
 ```yaml
+connection:
+  bootstrap_user: user
+  identity_file: ~/.ssh/id_ed25519
 nodes:
-  - name: cam-front
-    camera_id: front
-    base_url: http://multivid-cam-front.local:8080
-    ssh_host: multivid-cam-front.local
-    ssh_user: openscan
-    remote_output_root: /srv/openscan-camera/sessions
-    local_alias: front
+  front:
+    host: cam-front.local
 ```
 
-`remote_output_root` may point either at the service session root, such as `/srv/openscan-camera/sessions`, or at the service share root, such as `/srv/openscan-camera`. The harvester normalizes both forms when building remote paths.
+The coordinator derives `http://HOST:8080`, the `openscan` harvest user and `/srv/openscan-camera/sessions`; it explicitly passes `identity_file` to `rsync`.
 
 Ansible provisions this SSH harvest path by default:
 
 - Installs `rsync` on camera nodes.
 - Gives the `openscan` service user a login shell for key-based SSH harvesting.
 - Uses `/var/lib/openscan-camera` as the `openscan` home so SSH `authorized_keys` is not placed in the group-writable Samba share.
-- Installs the coordinator user's public key from `~/.ssh/id_ed25519.pub`.
+- Installs the public key paired with `connection.identity_file`.
 
 If that key does not exist yet, create it before running Ansible:
 
 ```bash
 ssh-keygen -t ed25519
-ansible-playbook -i ansible/inventory.yml ansible/playbooks/site.yml -K
+ansible-playbook ansible/playbooks/site.yml -K
 ```
 
 Use `-k` only when Ansible should connect over SSH password instead of your existing SSH key. Password SSH requires `sshpass` on the coordinator.
 
-To use a different public key or explicit key list, set:
-
-```yaml
-openscan_harvest_ssh_public_key_file: /path/to/key.pub
-openscan_harvest_ssh_authorized_keys:
-  - ssh-ed25519 AAAA...
-```
-
 After provisioning, this should work without a password prompt:
 
 ```bash
-ssh openscan@multivid-cam-front.local 'ls -la /srv/openscan-camera/sessions'
+ssh -i ~/.ssh/id_ed25519 openscan@cam-front.local 'ls -la /srv/openscan-camera/sessions'
 ```
 
 Useful options:
 
 ```bash
-multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --dry-run
-multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --node cam-front
-multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --overwrite
-multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --allow-partial
-multicam --nodes examples/nodes.yml harvest --session benchy_scan_001 --hash-video
+multicam --config multivid.yml harvest --session benchy_scan_001 --dry-run
+multicam --config multivid.yml harvest --session benchy_scan_001 --node cam-front
+multicam --config multivid.yml harvest --session benchy_scan_001 --overwrite
+multicam --config multivid.yml harvest --session benchy_scan_001 --allow-partial
+multicam --config multivid.yml harvest --session benchy_scan_001 --hash-video
 ```
 
 Harvesting is idempotent. If a local file already exists and the remote size and mtime match, it is reported as unchanged. If a local file exists with different metadata, the harvester does not overwrite it unless `--overwrite` is set. Offline nodes, missing sessions, missing manifests, missing recordings, empty recordings, and manifest identity mismatches are recorded in `harvest_report.json` and `session_index.json`. The command returns a non-zero exit code for incomplete harvests unless `--allow-partial` is set.
@@ -566,14 +539,14 @@ Example workflow:
 1. Start dashboard:
 
    ```bash
-   multicam dashboard --config examples/nodes.yml --port 8090
+   multicam --config multivid.yml dashboard --port 8090
    ```
 
 2. Position cameras and record one or more takes.
 3. Harvest:
 
    ```bash
-   multicam harvest --session benchy_scan_001 --output ./harvested_sessions
+   multicam --config multivid.yml harvest --session benchy_scan_001 --output ./harvested_sessions
    ```
 
 4. Generate stringout:
@@ -712,9 +685,9 @@ Normal user flow:
 During prepare, the MVP validates the selected profile, creates/checks output paths, records disk space, records the requested camera-control policy, and optionally runs a short `rpicam-vid` warmup when `prepare_warmup_seconds` is greater than zero. The normal coordinator path does not need to call prepare explicitly, but these debugging commands are available:
 
 ```bash
-multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25_auto
-multicam --nodes examples/nodes.yml prepare --session test-001 --profile video_1080p25_auto --force
-multicam --nodes examples/nodes.yml prepare-reset --session test-001
+multicam --config multivid.yml prepare --session test-001 --profile video_1080p25_auto
+multicam --config multivid.yml prepare --session test-001 --profile video_1080p25_auto --force
+multicam --config multivid.yml prepare-reset --session test-001
 ```
 
 Status output includes state, backend, prepared session/profile validity, recording session/take/profile, output path, PID, last error, free disk space, service version, resolved controls, applied controls, unsupported controls, and warnings.
@@ -774,11 +747,11 @@ Calibration runs are short `rpicam-vid` captures used to collect backend metadat
 Run a calibration pass across all configured nodes:
 
 ```bash
-multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto
-multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto --duration 8
-multicam --nodes examples/nodes.yml calibration-status
-multicam --nodes examples/nodes.yml calibration-last
-multicam --nodes examples/nodes.yml calibration-suggestions
+multicam --config multivid.yml calibrate --session test-001 --profile video_1080p25_auto
+multicam --config multivid.yml calibrate --session test-001 --profile video_1080p25_auto --duration 8
+multicam --config multivid.yml calibration-status
+multicam --config multivid.yml calibration-last
+multicam --config multivid.yml calibration-suggestions
 ```
 
 Recommended workflow:
@@ -818,8 +791,8 @@ camera_control_policy:
 If suggestions are available and `reuse_prepared_controls` is true, `prepared_state.json` records the calibration id, manifest path, suggestion path, and a snapshot of the suggested controls. `video_1080p25_calibrated_suggest` applies those available suggestions automatically because its profile policy sets `apply_suggestions_to_recording: true`:
 
 ```bash
-multicam --nodes examples/nodes.yml calibrate --session test-001 --profile video_1080p25_auto --apply-to-session
-multicam --nodes examples/nodes.yml start --session test-001 --profile video_1080p25_calibrated_suggest
+multicam --config multivid.yml calibrate --session test-001 --profile video_1080p25_auto --apply-to-session
+multicam --config multivid.yml start --session test-001 --profile video_1080p25_calibrated_suggest
 ```
 
 The explicit `--apply-calibration-suggestions` start flag remains available for testing other profiles that link suggestions but do not apply them by default.

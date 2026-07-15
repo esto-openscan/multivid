@@ -42,9 +42,9 @@ except Exception:
 
 
 class DashboardConfigTests(unittest.TestCase):
-    def test_dashboard_config_loads_defaults_from_nodes_file(self) -> None:
+    def test_dashboard_config_uses_code_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nodes.yml"
+            path = Path(temp_dir) / "multivid.yml"
             path.write_text(
                 """
 nodes:
@@ -67,16 +67,16 @@ dashboard:
 
             config = load_dashboard_config(path)
 
-        self.assertEqual(config.positioning.width, 800)
-        self.assertEqual(config.positioning.height, 450)
-        self.assertEqual(config.positioning.fps, 4)
-        self.assertEqual(config.positioning.jpeg_quality, 70)
-        self.assertEqual(config.positioning.overlays, ("camera_label", "grid"))
-        self.assertEqual(config.status_refresh_seconds, 5)
+        self.assertEqual(config.positioning.width, 640)
+        self.assertEqual(config.positioning.height, 360)
+        self.assertEqual(config.positioning.fps, 5)
+        self.assertEqual(config.positioning.jpeg_quality, 75)
+        self.assertIn("shorts_safe_area", config.positioning.overlays)
+        self.assertEqual(config.status_refresh_seconds, 3)
 
-    def test_dashboard_config_is_backward_compatible_without_dashboard_section(self) -> None:
+    def test_dashboard_config_uses_defaults_without_reading_fleet_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nodes.yml"
+            path = Path(temp_dir) / "multivid.yml"
             path.write_text(
                 """
 nodes:

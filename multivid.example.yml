@@ -1,0 +1,13 @@
+version: 1
+
+connection:
+  bootstrap_user: user
+  identity_file: ~/.ssh/id_ed25519
+
+nodes:
+  front:
+    host: cam-front.local
+  side:
+    host: cam-side.local
+  top:
+    host: cam-top.local

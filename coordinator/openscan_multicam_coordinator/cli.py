@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from .client import NodeResult, request_node
-from .config import DEFAULT_NODES_PATH, NodeConfig, load_nodes_config
+from .config import DEFAULT_CONFIG_PATH, NodeConfig, load_nodes_config
 from .edit_assets import DEFAULT_PROXY_HEIGHT, EditAssetOptions, prepare_edit_assets
 from .harvest import DEFAULT_BACKEND, DEFAULT_HARVEST_OUTPUT_ROOT, HarvestOptions, harvest_session
 from .stringout import DEFAULT_FPS, DEFAULT_RESOLUTION, DEFAULT_SPEED, StringoutOptions, derive_stringout
@@ -17,7 +17,7 @@ from .stringout import DEFAULT_FPS, DEFAULT_RESOLUTION, DEFAULT_SPEED, Stringout
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="multicam", description="Control OpenScan camera nodes")
-    parser.add_argument("--nodes", default=DEFAULT_NODES_PATH, help="Path to nodes.yml")
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help="Path to multivid.yml")
     parser.add_argument("--timeout", type=float, default=8.0, help="Per-node HTTP timeout in seconds")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -159,7 +159,6 @@ def build_parser() -> argparse.ArgumentParser:
     edit_assets_parser.add_argument("--take", dest="take_id", help="Prepare only one take id")
 
     dashboard_parser = subparsers.add_parser("dashboard", help="Run the local browser operator dashboard")
-    dashboard_parser.add_argument("--config", help="Path to nodes.yml; defaults to --nodes")
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Dashboard bind host")
     dashboard_parser.add_argument("--port", type=int, default=8090, help="Dashboard bind port")
     dashboard_parser.add_argument("--open-browser", action="store_true", help="Open the dashboard URL in a browser")
@@ -177,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "prepare-edit-assets":
         return _run_edit_assets_command(args)
 
-    nodes_path = getattr(args, "config", None) or args.nodes
+    nodes_path = args.config
     try:
         nodes = load_nodes_config(nodes_path)
     except Exception as exc:

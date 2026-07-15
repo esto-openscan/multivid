@@ -319,7 +319,11 @@ def build_rsync_command(node: NodeConfig, remote_path: str, local_path: Path) ->
     if not node.ssh_host:
         raise ValueError(f"{node.name}: ssh_host is required for rsync_ssh harvest")
     remote_target = f"{node.ssh_user}@{node.ssh_host}" if node.ssh_user else node.ssh_host
-    return ["rsync", "-a", "--protect-args", f"{remote_target}:{remote_path}", str(local_path)]
+    command = ["rsync", "-a", "--protect-args"]
+    if node.ssh_identity_file is not None:
+        command.extend(["-e", f"ssh -i {node.ssh_identity_file} -o IdentitiesOnly=yes"])
+    command.extend([f"{remote_target}:{remote_path}", str(local_path)])
+    return command
 
 
 def remote_camera_session_path(node: NodeConfig, session_id: str) -> str:

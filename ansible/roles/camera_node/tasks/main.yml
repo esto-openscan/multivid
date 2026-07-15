@@ -232,7 +232,7 @@
 
 - name: Wait for camera node health endpoint
   ansible.builtin.uri:
-    url: "http://127.0.0.1:{{ openscan_camera_node_listen_port }}/health"
+    url: "http://127.0.0.1:8080/health"
     method: GET
     return_content: true
     status_code: 200

@@ -1,0 +1,23 @@
+openscan_service_user: openscan
+openscan_service_group: openscan
+openscan_service_home: /var/lib/openscan-camera
+openscan_service_extra_groups:
+  - video
+  - render
+openscan_share_root: /srv/openscan-camera
+openscan_sessions_root: "{{ openscan_share_root }}/sessions"
+openscan_common_packages:
+  - python3
+  - python3-venv
+  - python3-pip
+  - python3-setuptools
+  - ca-certificates
+  - git
+  - curl
+  - rsync
+  - rpicam-apps-lite
+openscan_harvest_ssh_enabled: true
+openscan_harvest_ssh_user: "{{ openscan_service_user }}"
+openscan_harvest_ssh_home: "{{ openscan_service_home }}"
+openscan_harvest_ssh_shell: /bin/bash
+openscan_harvest_ssh_authorized_keys: []

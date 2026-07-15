@@ -1,26 +1,11 @@
 camera_id: "{{ camera_id }}"
-listen_host: "{{ openscan_camera_node_listen_host }}"
-listen_port: {{ openscan_camera_node_listen_port }}
-output_root: "{{ openscan_sessions_root }}"
-camera_control_policy:
-  use_calibration_suggestions: {{ openscan_camera_control_policy_use_calibration_suggestions | default(false) | bool | lower }}
-  apply_suggestions_to_recording: {{ openscan_camera_control_policy_apply_suggestions_to_recording | default(false) | bool | lower }}
+{% if openscan_camera_transform %}
 camera_transform:
-  hflip: {{ (openscan_camera_transform | default({})).hflip | default(false) | bool | lower }}
-  vflip: {{ (openscan_camera_transform | default({})).vflip | default(false) | bool | lower }}
-positioning:
-  width: {{ openscan_positioning_width | default(640) }}
-  height: {{ openscan_positioning_height | default(360) }}
-  fps: {{ openscan_positioning_fps | default(5) }}
-  jpeg_quality: {{ openscan_positioning_jpeg_quality | default(75) }}
-  overlays:
-{% for overlay in openscan_positioning_overlays | default(['camera_label', 'crosshair', 'shorts_safe_area']) %}
-    - {{ overlay }}
+{% for key, value in openscan_camera_transform.items() %}
+  {{ key }}: {{ value | bool | lower }}
 {% endfor %}
-reference_stills:
-  quality: {{ openscan_reference_stills_quality | default(95) }}
-  width: {{ openscan_reference_stills_width | default(none) | to_json }}
-  height: {{ openscan_reference_stills_height | default(none) | to_json }}
-  use_recording_profile_controls: {{ openscan_reference_stills_use_recording_profile_controls | default(true) | bool | lower }}
+{% endif %}
+{% if openscan_camera_node_profile_overrides %}
 profile_overrides:
-{{ openscan_camera_node_profile_overrides | default({}) | to_nice_yaml(indent=2, sort_keys=False) | indent(2, true) }}
+{{ openscan_camera_node_profile_overrides | to_nice_yaml(indent=2, sort_keys=False) | indent(2, true) }}
+{% endif %}

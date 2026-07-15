@@ -25,16 +25,16 @@ from openscan_multicam_coordinator.harvest import (
 class HarvestTests(unittest.TestCase):
     def test_config_parses_harvest_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "nodes.yml"
+            path = Path(temp_dir) / "multivid.yml"
             path.write_text(
                 """
+version: 1
+connection:
+  bootstrap_user: user
+  identity_file: ~/.ssh/id_ed25519
 nodes:
-  - name: cam-front
-    camera_id: front
-    base_url: http://cam-front.local:8080
-    ssh_user: openscan
-    remote_output_root: /srv/openscan-camera
-    local_alias: front-left
+  front:
+    host: cam-front.local
     enabled: false
 """,
                 encoding="utf-8",
@@ -45,9 +45,10 @@ nodes:
         self.assertEqual(len(nodes), 1)
         self.assertEqual(nodes[0].ssh_host, "cam-front.local")
         self.assertEqual(nodes[0].ssh_user, "openscan")
-        self.assertEqual(nodes[0].remote_output_root, "/srv/openscan-camera")
-        self.assertEqual(nodes[0].harvest_folder, "front-left")
+        self.assertEqual(nodes[0].remote_output_root, "/srv/openscan-camera/sessions")
+        self.assertEqual(nodes[0].harvest_folder, "front")
         self.assertFalse(nodes[0].enabled)
+        self.assertEqual(nodes[0].ssh_identity_file, Path.home() / ".ssh/id_ed25519")
 
     def test_remote_path_normalizes_service_root_and_sessions_root(self) -> None:
         service_root = NodeConfig(
@@ -86,6 +87,19 @@ nodes:
         self.assertEqual(command[0:3], ["rsync", "-a", "--protect-args"])
         self.assertEqual(command[3], "openscan@cam-front.local:/srv/openscan-camera/sessions/s/front/take_001/manifest.json")
         self.assertEqual(command[4], "out")
+
+    def test_build_rsync_command_explicitly_uses_fleet_identity(self) -> None:
+        node = NodeConfig(
+            name="cam-front",
+            camera_id="front",
+            base_url="http://cam-front.local:8080",
+            ssh_identity_file=Path("/keys/fleet"),
+        )
+
+        command = build_rsync_command(node, "/remote/file", Path("out"))
+
+        self.assertEqual(command[3:5], ["-e", "ssh -i /keys/fleet -o IdentitiesOnly=yes"])
+        self.assertEqual(command[5], "openscan@cam-front.local:/remote/file")
 
     def test_session_index_detects_missing_manifest_and_empty_recording(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

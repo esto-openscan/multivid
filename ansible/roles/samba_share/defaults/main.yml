@@ -1,0 +1,6 @@
+openscan_samba_workgroup: WORKGROUP
+openscan_samba_share_name: openscan-camera
+openscan_samba_guest_access: true
+openscan_samba_username: openscan
+openscan_samba_password: change-me-use-ansible-vault
+openscan_samba_force_user: "{{ openscan_service_user }}"

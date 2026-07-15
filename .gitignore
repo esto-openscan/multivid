@@ -10,9 +10,7 @@ venv/
 dist/
 build/
 
-ansible/inventory.yml
-ansible/host_vars/*.yml
-!ansible/host_vars/*.example.yml
+multivid.yml
 
 sessions/
 harvested_sessions/
